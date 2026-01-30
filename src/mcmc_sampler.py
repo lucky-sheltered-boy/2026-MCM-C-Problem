@@ -239,6 +239,102 @@ class MCMCSampler:
         
         return self.samples
     
+    def sample_week_finale(self, judge_share: np.ndarray,
+                          finale_rankings: list,
+                          voting_method: str) -> np.ndarray:
+        """
+        对决赛周进行MCMC采样，约束最终排名
+        
+        Args:
+            judge_share: 评委得分份额（已归一化）
+            finale_rankings: 决赛排名列表 [{'survivor_idx': idx, 'place': 排名}, ...]
+            voting_method: 投票方法
+            
+        Returns:
+            粉丝投票份额的后验样本 (n_samples × n_contestants)
+        """
+        n_contestants = len(judge_share)
+        
+        # 解析排名约束：从好到差排列的选手索引
+        sorted_rankings = sorted(finale_rankings, key=lambda x: x['final_place'])
+        ranking_order = [r['survivor_idx'] for r in sorted_rankings]  # 按名次从1到n排序
+        
+        # 定义似然函数：粉丝投票需要产生正确的最终排名
+        def calculate_log_likelihood_finale(fan_votes: np.ndarray) -> float:
+            """计算满足决赛排名约束的似然度"""
+            if voting_method in ['rank', 'rank_bottom2']:
+                n = len(fan_votes)
+                judge_rank = n + 1 - np.argsort(np.argsort(judge_share)) - 1
+                fan_rank = n + 1 - np.argsort(np.argsort(fan_votes)) - 1
+                combined = judge_rank + fan_rank  # 越小越好
+                predicted_order = np.argsort(combined)
+            else:  # percentage
+                combined = 0.5 * judge_share + 0.5 * fan_votes
+                predicted_order = np.argsort(-combined)  # 从高到低
+            
+            # 检查预测排名是否与实际排名一致
+            predicted_order_list = list(predicted_order)
+            
+            # 计算排名差异的惩罚
+            penalty = 0.0
+            for i, correct_idx in enumerate(ranking_order):
+                if i < len(predicted_order_list):
+                    predicted_position = predicted_order_list.index(correct_idx) if correct_idx in predicted_order_list else i
+                    penalty += (predicted_position - i) ** 2
+            
+            # 完全匹配时penalty=0，给予高似然度；否则惩罚
+            if penalty == 0:
+                return 0.0  # log(1) = 0
+            else:
+                return -penalty * 5.0  # 强惩罚偏离正确排名的情况
+        
+        # 初始化无约束向量
+        z_current = np.zeros(n_contestants)
+        
+        # 找一个满足约束的初始点
+        for _ in range(1000):
+            z_test = np.random.randn(n_contestants) * 0.5
+            fan_test = self.softmax_transform(z_test)
+            if calculate_log_likelihood_finale(fan_test) == 0.0:
+                z_current = z_test
+                break
+        
+        # MCMC采样
+        samples = []
+        accepted = 0
+        
+        for i in range(self.n_iterations):
+            # 提议新状态
+            z_proposed = z_current + np.random.randn(n_contestants) * self.proposal_sigma
+            
+            fan_current = self.softmax_transform(z_current)
+            fan_proposed = self.softmax_transform(z_proposed)
+            
+            log_lik_current = calculate_log_likelihood_finale(fan_current)
+            log_lik_proposed = calculate_log_likelihood_finale(fan_proposed)
+            
+            # 先验（均匀）
+            log_prior_current = -0.5 * np.sum(z_current ** 2)
+            log_prior_proposed = -0.5 * np.sum(z_proposed ** 2)
+            
+            log_posterior_current = log_lik_current + log_prior_current
+            log_posterior_proposed = log_lik_proposed + log_prior_proposed
+            
+            log_acceptance_ratio = log_posterior_proposed - log_posterior_current
+            
+            if log_acceptance_ratio > 0 or np.random.rand() < np.exp(log_acceptance_ratio):
+                z_current = z_proposed
+                accepted += 1
+            
+            if i >= self.burn_in and (i - self.burn_in) % self.thinning == 0:
+                fan_votes = self.softmax_transform(z_current)
+                samples.append(fan_votes)
+        
+        self.acceptance_rate = accepted / self.n_iterations
+        self.samples = np.array(samples)
+        
+        return self.samples
+    
     def calculate_hpdi(self, samples: np.ndarray, credibility: float = 0.95) -> np.ndarray:
         """
         计算最高后验密度区间 (HPDI)

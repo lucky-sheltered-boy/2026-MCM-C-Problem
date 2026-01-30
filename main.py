@@ -70,6 +70,12 @@ class DWTSVotingEstimator:
         """
         估算单周的粉丝投票（运行多条链）
         
+        支持：
+        - 单人淘汰（正常情况）
+        - 多人淘汰
+        - 无人淘汰（仅记录，不估算）
+        - 决赛周（估算最终排名）
+        
         Args:
             season: 赛季编号
             week: 周次
@@ -81,92 +87,217 @@ class DWTSVotingEstimator:
         season_data = self.processed_data[season]
         week_data = season_data['weeks'][week]
         
-        # 获取评委得分份额（已在data_loader中计算）
+        # 获取评委得分份额
         judge_share = week_data['judge_share']
         survivors = week_data['survivors']
-        
-        # 找到被淘汰选手在存活者中的索引
-        eliminated_idx_in_survivors = week_data['eliminated_idx_in_survivors']
-        if eliminated_idx_in_survivors is None:
-            return None
-        
-        # 获取投票方法
         voting_method = season_data['voting_method']
         
-        # 运行多条MCMC链
-        chains = []
-        acceptance_rates = []
+        # 处理特殊情况
+        is_no_elimination = week_data['is_no_elimination']
+        is_multi_elimination = week_data['is_multi_elimination']
+        is_finale = week_data['is_finale']
+        n_eliminated = week_data['n_eliminated']
         
-        for chain_id in range(n_chains):
-            samples = self.sampler.sample_week(
-                judge_share, eliminated_idx_in_survivors, voting_method
+        # 无人淘汰周：仅记录，不估算
+        if is_no_elimination and not is_finale:
+            return {
+                'season': season,
+                'week': week,
+                'voting_method': voting_method,
+                'n_survivors': len(survivors),
+                'is_no_elimination': True,
+                'is_finale': False,
+                'survivor_names': week_data['survivor_names'],
+                'judge_share': judge_share,
+                'note': '本周无人淘汰'
+            }
+        
+        # 决赛周：估算最终排名的粉丝投票
+        if is_finale:
+            return self._estimate_finale_week(season, week, n_chains)
+        
+        # 正常淘汰周（单人或多人）
+        eliminated_indices = week_data['eliminated_indices_in_survivors']
+        
+        if len(eliminated_indices) == 0:
+            return None
+        
+        # 对于多人淘汰，我们逐个估算每个被淘汰者
+        # 假设淘汰是按某种顺序进行的（这是一个简化假设）
+        results_list = []
+        
+        for elim_idx in eliminated_indices:
+            # 运行多条MCMC链
+            chains = []
+            acceptance_rates = []
+            
+            for chain_id in range(n_chains):
+                samples = self.sampler.sample_week(
+                    judge_share, elim_idx, voting_method
+                )
+                chains.append(samples)
+                acceptance_rates.append(self.sampler.acceptance_rate)
+            
+            # 合并所有链的样本
+            all_samples = np.vstack(chains)
+            
+            # 计算诊断指标
+            r_hat = ModelDiagnostics.gelman_rubin_statistic(chains)
+            ess = ModelDiagnostics.effective_sample_size(all_samples)
+            hpdi = self.sampler.calculate_hpdi(all_samples)
+            hpdi_widths = CertaintyMetrics.calculate_hpdi_width(all_samples)
+            posterior_std = CertaintyMetrics.calculate_posterior_std(all_samples)
+            cv = CertaintyMetrics.calculate_coefficient_of_variation(all_samples)
+            
+            # 后验预测检查
+            ppc_score = ModelDiagnostics.posterior_predictive_check(
+                all_samples, judge_share, elim_idx, voting_method
             )
-            chains.append(samples)
-            acceptance_rates.append(self.sampler.acceptance_rate)
+            
+            eliminated_name = week_data['survivor_names'][elim_idx]
+            
+            result = {
+                'eliminated_celebrity': eliminated_name,
+                'eliminated_idx_in_survivors': elim_idx,
+                'fan_votes_mean': np.mean(all_samples, axis=0),
+                'fan_votes_std': posterior_std,
+                'fan_votes_hpdi': hpdi,
+                'samples': all_samples,
+                'r_hat': r_hat,
+                'ess': ess,
+                'acceptance_rates': acceptance_rates,
+                'avg_acceptance_rate': np.mean(acceptance_rates),
+                'hpdi_widths': hpdi_widths,
+                'coefficient_of_variation': cv,
+                'consistency_score': ppc_score,
+                'converged': np.all(r_hat < 1.1)
+            }
+            results_list.append(result)
         
-        # 合并所有链的样本
-        all_samples = np.vstack(chains)
-        
-        # 计算Gelman-Rubin统计量
-        r_hat = ModelDiagnostics.gelman_rubin_statistic(chains)
-        
-        # 计算有效样本量
-        ess = ModelDiagnostics.effective_sample_size(all_samples)
-        
-        # 计算确定性度量
-        hpdi = self.sampler.calculate_hpdi(all_samples)
-        hpdi_widths = CertaintyMetrics.calculate_hpdi_width(all_samples)
-        posterior_std = CertaintyMetrics.calculate_posterior_std(all_samples)
-        cv = CertaintyMetrics.calculate_coefficient_of_variation(all_samples)
-        
-        # 后验预测检查
-        ppc_score = ModelDiagnostics.posterior_predictive_check(
-            all_samples, judge_share, eliminated_idx_in_survivors, voting_method
-        )
-        
-        # 整理结果
-        eliminated_idx = week_data['eliminated_idx']
-        eliminated_name = week_data['survivor_names'][eliminated_idx_in_survivors] if eliminated_idx_in_survivors is not None else "Unknown"
-        
-        result = {
+        # 整理最终结果
+        final_result = {
             'season': season,
             'week': week,
             'voting_method': voting_method,
             'n_survivors': len(survivors),
-            'eliminated_celebrity': eliminated_name,
-            
-            # 后验估计
+            'survivor_names': week_data['survivor_names'],
+            'judge_share': judge_share,
+            'is_no_elimination': False,
+            'is_multi_elimination': is_multi_elimination,
+            'is_finale': False,
+            'n_eliminated': n_eliminated,
+            'eliminations': results_list,  # 每个被淘汰者的详细结果
+        }
+        
+        # 计算整体一致性（所有淘汰者的平均）
+        if results_list:
+            final_result['avg_consistency_score'] = np.mean([r['consistency_score'] for r in results_list])
+            final_result['all_converged'] = all(r['converged'] for r in results_list)
+            final_result['avg_acceptance_rate'] = np.mean([r['avg_acceptance_rate'] for r in results_list])
+            # 兼容性：如果只有一人被淘汰，保留旧字段
+            if len(results_list) == 1:
+                r = results_list[0]
+                final_result['eliminated_celebrity'] = r['eliminated_celebrity']
+                final_result['fan_votes_mean'] = r['fan_votes_mean']
+                final_result['fan_votes_std'] = r['fan_votes_std']
+                final_result['fan_votes_hpdi'] = r['fan_votes_hpdi']
+                final_result['samples'] = r['samples']
+                final_result['r_hat'] = r['r_hat']
+                final_result['ess'] = r['ess']
+                final_result['hpdi_widths'] = r['hpdi_widths']
+                final_result['consistency_score'] = r['consistency_score']
+                final_result['converged'] = r['converged']
+        
+        return final_result
+    
+    def _estimate_finale_week(self, season: int, week: int, n_chains: int = 3) -> Dict:
+        """估算决赛周的粉丝投票（决定最终排名）"""
+        season_data = self.processed_data[season]
+        week_data = season_data['weeks'][week]
+        
+        judge_share = week_data['judge_share']
+        survivors = week_data['survivors']
+        voting_method = season_data['voting_method']
+        finale_rankings = week_data.get('finale_rankings', [])
+        
+        # 运行MCMC采样
+        chains = []
+        acceptance_rates = []
+        
+        for chain_id in range(n_chains):
+            # 决赛使用特殊的似然函数（需要匹配最终排名）
+            samples = self.sampler.sample_week_finale(
+                judge_share, finale_rankings, voting_method
+            )
+            chains.append(samples)
+            acceptance_rates.append(self.sampler.acceptance_rate)
+        
+        all_samples = np.vstack(chains)
+        
+        # 诊断
+        r_hat = ModelDiagnostics.gelman_rubin_statistic(chains)
+        hpdi = self.sampler.calculate_hpdi(all_samples)
+        hpdi_widths = CertaintyMetrics.calculate_hpdi_width(all_samples)
+        posterior_std = CertaintyMetrics.calculate_posterior_std(all_samples)
+        
+        # 验证排名一致性
+        ranking_consistency = self._check_finale_ranking_consistency(
+            all_samples, judge_share, finale_rankings, voting_method
+        )
+        
+        return {
+            'season': season,
+            'week': week,
+            'voting_method': voting_method,
+            'n_survivors': len(survivors),
+            'survivor_names': week_data['survivor_names'],
+            'judge_share': judge_share,
+            'is_no_elimination': False,
+            'is_finale': True,
+            'finale_rankings': finale_rankings,
             'fan_votes_mean': np.mean(all_samples, axis=0),
             'fan_votes_std': posterior_std,
             'fan_votes_hpdi': hpdi,
-            
-            # 评委信息
-            'judge_share': judge_share,
-            
-            # 样本
-            'samples': all_samples,
-            
-            # 诊断指标
-            'r_hat': r_hat,
-            'ess': ess,
-            'acceptance_rates': acceptance_rates,
-            'avg_acceptance_rate': np.mean(acceptance_rates),
-            
-            # 确定性度量
             'hpdi_widths': hpdi_widths,
-            'coefficient_of_variation': cv,
-            
-            # 一致性
-            'consistency_score': ppc_score,
-            
-            # 收敛状态
-            'converged': np.all(r_hat < 1.1)
+            'samples': all_samples,
+            'r_hat': r_hat,
+            'converged': np.all(r_hat < 1.1),
+            'avg_acceptance_rate': np.mean(acceptance_rates),
+            'ranking_consistency': ranking_consistency
         }
+    
+    def _check_finale_ranking_consistency(self, samples: np.ndarray, 
+                                          judge_share: np.ndarray,
+                                          finale_rankings: List[Dict],
+                                          voting_method: str) -> float:
+        """检查决赛排名的一致性"""
+        if not finale_rankings:
+            return 0.0
         
-        return result
+        correct_count = 0
+        n_samples = samples.shape[0]
+        
+        for fan_votes in samples:
+            # 计算综合得分并排序
+            if voting_method in ['rank', 'rank_bottom2']:
+                n = len(fan_votes)
+                judge_rank = n + 1 - np.argsort(np.argsort(judge_share)) - 1
+                fan_rank = n + 1 - np.argsort(np.argsort(fan_votes)) - 1
+                combined = judge_rank + fan_rank
+                predicted_order = np.argsort(combined)  # 从好到差
+            else:  # percentage
+                combined = 0.5 * judge_share + 0.5 * fan_votes
+                predicted_order = np.argsort(-combined)  # 从高到低
+            
+            # 检查预测顺序是否与实际排名匹配
+            actual_order = [f['survivor_idx'] for f in finale_rankings]
+            if list(predicted_order[:len(actual_order)]) == actual_order:
+                correct_count += 1
+        
+        return correct_count / n_samples
     
     def estimate_season(self, season: int, n_chains: int = 3):
-        """估算整个赛季的粉丝投票"""
+        """估算整个赛季的粉丝投票（处理所有特殊情况）"""
         print(f"\n{'=' * 60}")
         print(f"估算赛季 {season}")
         print(f"{'=' * 60}")
@@ -177,22 +308,43 @@ class DWTSVotingEstimator:
         for week_num in sorted(season_data['weeks'].keys()):
             week_data = season_data['weeks'][week_num]
             
-            # 跳过没有淘汰的周
-            if week_data['eliminated_idx_in_survivors'] is None:
-                continue
-            
             print(f"\n周次 {week_num}: ", end="")
             
             result = self.estimate_fan_votes_single_week(season, week_num, n_chains)
             
-            if result is not None:
-                season_results[week_num] = result
-                
-                # 显示简要信息
-                print(f"淘汰 {result['eliminated_celebrity']}")
-                print(f"  收敛: {'✓' if result['converged'] else '✗'} | "
-                      f"一致性: {result['consistency_score']:.1%} | "
+            if result is None:
+                print("跳过（无有效数据）")
+                continue
+            
+            season_results[week_num] = result
+            
+            # 根据不同情况显示信息
+            if result.get('is_no_elimination') and not result.get('is_finale'):
+                print(f"无人淘汰（存活 {result['n_survivors']} 人）")
+            elif result.get('is_finale'):
+                n_finalists = len(result.get('finale_rankings', []))
+                consistency = result.get('ranking_consistency', 0)
+                converged = result.get('converged', False)
+                print(f"决赛周 ({n_finalists} 人决赛)")
+                print(f"  收敛: {'✓' if converged else '✗'} | "
+                      f"排名一致性: {consistency:.1%} | "
                       f"接受率: {result['avg_acceptance_rate']:.1%}")
+                # 显示决赛排名
+                for f in result.get('finale_rankings', []):
+                    print(f"    第{f['final_place']}名: {f['name']}")
+            elif result.get('is_multi_elimination'):
+                print(f"多人淘汰 ({result['n_eliminated']} 人):")
+                for elim in result.get('eliminations', []):
+                    print(f"    - {elim['eliminated_celebrity']}: "
+                          f"一致性 {elim['consistency_score']:.1%}")
+                print(f"  整体收敛: {'✓' if result.get('all_converged') else '✗'} | "
+                      f"平均一致性: {result.get('avg_consistency_score', 0):.1%}")
+            else:
+                # 单人淘汰（正常情况）
+                print(f"淘汰 {result.get('eliminated_celebrity', 'Unknown')}")
+                print(f"  收敛: {'✓' if result.get('converged') else '✗'} | "
+                      f"一致性: {result.get('consistency_score', 0):.1%} | "
+                      f"接受率: {result.get('avg_acceptance_rate', 0):.1%}")
         
         self.estimation_results[season] = season_results
         return season_results
@@ -227,30 +379,86 @@ class DWTSVotingEstimator:
         print(f"✓ 摘要已保存到: {summary_path}")
     
     def generate_summary(self) -> Dict:
-        """生成结果摘要"""
+        """生成结果摘要（处理特殊情况）"""
         summary = {
             'total_seasons': len(self.estimation_results),
             'seasons': {}
         }
         
         for season, season_results in self.estimation_results.items():
+            # 过滤出有采样结果的周次（跳过零淘汰周）
+            estimation_weeks = {k: v for k, v in season_results.items() 
+                               if not v.get('is_no_elimination', False)}
+            
+            # 计算收敛周数（处理不同字段名）
+            def is_converged(r):
+                if r.get('is_multi_elimination'):
+                    return r.get('all_converged', False)
+                return r.get('converged', False)
+            
+            # 计算一致性得分（处理不同字段名）
+            def get_consistency(r):
+                if r.get('is_finale'):
+                    return r.get('ranking_consistency', 0)
+                if r.get('is_multi_elimination'):
+                    return r.get('avg_consistency_score', 0)
+                return r.get('consistency_score', 0)
+            
             season_summary = {
                 'total_weeks': len(season_results),
-                'converged_weeks': sum(1 for r in season_results.values() if r['converged']),
-                'avg_consistency': np.mean([r['consistency_score'] for r in season_results.values()]),
-                'avg_acceptance_rate': np.mean([r['avg_acceptance_rate'] for r in season_results.values()]),
+                'estimation_weeks': len(estimation_weeks),
+                'no_elimination_weeks': len(season_results) - len(estimation_weeks),
+                'converged_weeks': sum(1 for r in estimation_weeks.values() if is_converged(r)),
+                'avg_consistency': np.mean([get_consistency(r) for r in estimation_weeks.values()]) if estimation_weeks else 0,
+                'avg_acceptance_rate': np.mean([r.get('avg_acceptance_rate', 0) 
+                                               for r in estimation_weeks.values()]) if estimation_weeks else 0,
                 'weeks': {}
             }
             
             for week, result in season_results.items():
-                week_summary = {
-                    'eliminated': result['eliminated_celebrity'],
-                    'consistency': float(result['consistency_score']),
-                    'converged': bool(result['converged']),
-                    'fan_votes_mean': result['fan_votes_mean'].tolist(),
-                    'fan_votes_std': result['fan_votes_std'].tolist(),
-                    'hpdi_widths': result['hpdi_widths'].tolist()
-                }
+                if result.get('is_no_elimination', False):
+                    week_summary = {
+                        'type': 'no_elimination',
+                        'n_survivors': result['n_survivors']
+                    }
+                elif result.get('is_finale', False):
+                    week_summary = {
+                        'type': 'finale',
+                        'n_finalists': result['n_survivors'],
+                        'finale_rankings': [f['name'] for f in result['finale_rankings']],
+                        'ranking_consistency': float(result['ranking_consistency']),
+                        'converged': bool(result['converged']),
+                        'fan_votes_mean': result['fan_votes_mean'].tolist(),
+                        'fan_votes_std': result['fan_votes_std'].tolist(),
+                        'hpdi_widths': result['hpdi_widths'].tolist()
+                    }
+                elif result.get('is_multi_elimination', False):
+                    # 多人淘汰周：汇总各被淘汰者的结果
+                    eliminations_summary = []
+                    for elim in result.get('eliminations', []):
+                        eliminations_summary.append({
+                            'name': elim['eliminated_celebrity'],
+                            'consistency': float(elim['consistency_score']),
+                            'converged': bool(elim['converged'])
+                        })
+                    week_summary = {
+                        'type': 'multi_elimination',
+                        'n_eliminated': result['n_eliminated'],
+                        'eliminations': eliminations_summary,
+                        'avg_consistency': float(result.get('avg_consistency_score', 0)),
+                        'all_converged': bool(result.get('all_converged', False))
+                    }
+                else:
+                    # 单人淘汰（正常情况）
+                    week_summary = {
+                        'type': 'elimination',
+                        'eliminated': result.get('eliminated_celebrity', 'Unknown'),
+                        'consistency': float(result.get('consistency_score', 0)),
+                        'converged': bool(result.get('converged', False)),
+                        'fan_votes_mean': result['fan_votes_mean'].tolist(),
+                        'fan_votes_std': result['fan_votes_std'].tolist(),
+                        'hpdi_widths': result['hpdi_widths'].tolist()
+                    }
                 season_summary['weeks'][week] = week_summary
             
             summary['seasons'][season] = season_summary
@@ -278,16 +486,29 @@ class DWTSVotingEstimator:
         # 2. 确定性度量图
         self._plot_certainty_metrics(season, season_results, vis_dir)
         
-        # 3. 示例周次的后验分布
-        example_week = list(season_results.keys())[0]
-        self._plot_posterior_distributions(season, example_week, season_results[example_week], vis_dir)
+        # 3. 示例周次的后验分布 (选择第一个有样本的周次)
+        valid_weeks = {w: r for w, r in season_results.items() 
+                       if not r.get('is_no_elimination', False) and 'samples' in r}
+        if valid_weeks:
+            example_week = sorted(valid_weeks.keys())[0]
+            self._plot_posterior_distributions(season, example_week, valid_weeks[example_week], vis_dir)
         
         print(f"✓ 可视化结果已保存到: {vis_dir}")
     
     def _plot_consistency_trend(self, season: int, season_results: Dict, output_dir: Path):
         """绘制一致性趋势"""
-        weeks = sorted(season_results.keys())
-        consistency = [season_results[w]['consistency_score'] for w in weeks]
+        # 过滤掉零淘汰周
+        valid_weeks = {w: r for w, r in season_results.items() 
+                       if not r.get('is_no_elimination', False)}
+        
+        if not valid_weeks:
+            print("  无有效周次用于绘制一致性趋势")
+            return
+        
+        weeks = sorted(valid_weeks.keys())
+        # 处理决赛周和普通淘汰周不同的字段名
+        consistency = [valid_weeks[w].get('consistency_score', 
+                       valid_weeks[w].get('ranking_consistency', 0)) for w in weeks]
         
         plt.figure(figsize=(10, 6))
         plt.plot(weeks, consistency, marker='o', linewidth=2, markersize=8)
@@ -303,10 +524,29 @@ class DWTSVotingEstimator:
     
     def _plot_certainty_metrics(self, season: int, season_results: Dict, output_dir: Path):
         """绘制确定性度量"""
-        weeks = sorted(season_results.keys())
+        # 过滤掉零淘汰周，并确保有hpdi_widths数据
+        valid_weeks = {}
+        for w, r in season_results.items():
+            if r.get('is_no_elimination', False):
+                continue
+            # 处理多人淘汰周（数据在eliminations列表中）
+            if 'hpdi_widths' in r:
+                valid_weeks[w] = r['hpdi_widths']
+            elif 'eliminations' in r and r['eliminations']:
+                # 取第一个淘汰者的hpdi_widths
+                valid_weeks[w] = r['eliminations'][0].get('hpdi_widths', None)
+        
+        # 过滤掉None值
+        valid_weeks = {w: v for w, v in valid_weeks.items() if v is not None}
+        
+        if not valid_weeks:
+            print("  无有效周次用于绘制确定性度量")
+            return
+        
+        weeks = sorted(valid_weeks.keys())
         
         # 计算平均HPDI宽度
-        avg_hpdi_widths = [np.mean(season_results[w]['hpdi_widths']) for w in weeks]
+        avg_hpdi_widths = [np.mean(valid_weeks[w]) for w in weeks]
         
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.bar(weeks, avg_hpdi_widths, alpha=0.7, color='steelblue')
@@ -361,14 +601,15 @@ def main():
     
     # 运行分析流程
     try:
-        # 步骤1: 数据加载（测试前3个赛季）
-        estimator.load_and_process_data(seasons=[1, 2, 3])
+        # 步骤1: 数据加载（全部34个赛季）
+        all_seasons = list(range(1, 35))  # 赛季1-34
+        estimator.load_and_process_data(seasons=all_seasons)
         
         # 步骤2: MCMC采样估算
         estimator.estimate_all_seasons()
         
         # 步骤3: 可视化结果
-        for season in [1, 2, 3]:
+        for season in all_seasons:
             estimator.visualize_season(season)
         
         print("\n" + "=" * 60)
