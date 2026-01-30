@@ -1,90 +1,90 @@
-# Data Dictionary & Feature Engineering Report (数据字典与特征工程报告)
+# 数据字典与特征工程报告 (Data Dictionary & Feature Engineering Report)
 
-This document details the advanced statistical features constructed during the Data Preprocessing Phase. These features serve to transform raw "judge scores" into quantifiable "competitiveness metrics" and "fan influence proxy metrics."
+本文档详细描述了在数据预处理阶段（Data Preprocessing Phase）构建的高级统计特征。这些特征旨在将原始的“评委打分”转化为可量化的“竞争力指标”和“粉丝影响力代理指标”。
 
 ---
 
-## 1. Weekly Performance Metrics (实时竞技指标)
-These metrics capture specific performance in each week (Week $w$), normalized to eliminate noise caused by varying seasons (e.g., changes in the number of judges).
+## 1. 实时竞技指标 (Weekly Performance Metrics)
+这些指标捕捉了每一周（Week $w$）的具体表现，通过归一化处理消除了因赛季变化（例如评委人数的变化）引起的噪音。
 
-### 1.1 `week{w}_total_score` (Weekly Total Score)
-*   **Definition**: The sum of scores given by all present judges in Week $w$.
-*   **Calculation Logic**:
+### 1.1 `week{w}_total_score` (周总分)
+*   **定义**：第 $w$ 周所有在场评委给出的分数总和。
+*   **计算逻辑**：
     $$ S_{i,w} = \sum_{j=1}^{K_w} \text{Score}_{i,w,j} $$
-    Where $K_w$ is the number of judges for that week (usually 3 or 4). If a judge is absent (N/A), they are ignored. If a contestant is eliminated, the score is 0.
+    其中 $K_w$ 是该周的评委人数（通常是3或4）。如果评委缺席（N/A），则忽略。如果选手被淘汰，得分为0。
 
-### 1.2 `week{w}_percent_score` (Weekly Score Percentage)
-*   **Definition**: The proportion of points received relative to the theoretical maximum. This is the core standardized metric for cross-season comparison.
-*   **Calculation Logic**:
+### 1.2 `week{w}_percent_score` (周得分率)
+*   **定义**：选手获得的积分相对于理论满分的比例。这是跨赛季比较的核心标准化指标。
+*   **计算逻辑**：
     $$ P_{i,w} = \frac{S_{i,w}}{K_w \times 10} $$
-    *   **Range**: $[0, 1]$. For example, if 3 judges give a total of 27 points, the percentage is $27/30 = 0.9$.
+    *   **范围**：$[0, 1]$。例如，3位评委总共给了27分，百分比就是 $27/30 = 0.9$。
 
-### 1.3 `week{w}_judge_rank` (Weekly Judge Rank)
-*   **Definition**: The ranking of the contestant based on judge scores among all active contestants in that week of the season.
-*   **Calculation Logic**: Uses "Standard Competition Ranking" ("1224" method).
-    *   If two contestants tie for 1st, the next is ranked 3rd.
-    *   **Significance**: Directly determines pressure in the "Rank Method." A **lower** rank value indicates a **higher** judge evaluation.
+### 1.3 `week{w}_judge_rank` (周评委排名)
+*   **定义**：基于评委分数，选手在该赛季该周所有在场选手中的排名。
+*   **计算逻辑**：使用“标准竞赛排名”（"1224"方法）。
+    *   如果两人并列第1名，下一个就是第3名。
+    *   **意义**：该指标直接决定了选手在“排名法 (Rank Method)”下的生存压力。**更小**的排名数值代表**更高**的评委评价。
 
 ---
 
-## 2. Season-Aggregated Metrics (赛季综合实力)
-These metrics build a comprehensive profile of a contestant's strength.
+## 2. 赛季综合实力 (Season-Aggregated Metrics)
+这些指标构建了选手实力的综合画像。
 
-### 2.1 `avg_weekly_score` (Average Output Intensity)
-*   **Definition**: The average weekly total score during the contestant's active period.
-*   **Calculation Logic**:
+### 2.1 `avg_weekly_score` (平均输出强度)
+*   **定义**：选手在活跃期间的平均每周总分。
+*   **计算逻辑**：
     $$ \bar{S}_i = \frac{1}{|W_{active}|} \sum_{w \in W_{active}} S_{i,w} $$
-    Only counts active weeks where score > 0 to avoid "0 scores" from elimination weeks dragging down the average.
+    仅统计分数大于0的活跃周，避免淘汰周的“0分”拉低平均值。
 
-### 2.2 `score_std_dev` (Performance Stability)
-*   **Definition**: The standard deviation of the contestant's weekly scores.
-*   **Significance**:
-    *   **Low Value**: Consistent performance (e.g., professional athletes).
-    *   **High Value**: Volatile performance ("wildcard" contestants), often leading to controversy.
+### 2.2 `score_std_dev` (发挥稳定性)
+*   **定义**：选手周得分的标准差。
+*   **意义**：
+    *   **低值**：表现稳定（如职业运动员）。
+    *   **高值**：表现波动大（“神经刀”选手），经常引发争议。
 
-### 2.3 `avg_judge_rank` (Average Dominance)
-*   **Definition**: The average ranking of the contestant throughout the season.
-*   **Significance**: Better reflects relative standing in the contestant pool than raw scores.
+### 2.3 `avg_judge_rank` (平均统治力)
+*   **定义**：选手整个赛季的平均排名。
+*   **意义**：相比原始得分，更能反映在选手池中的相对地位。
 
 ---
 
-## 3. Contextual & External Effects (外部效应指标)
-Quantifies influence from non-contestant factors.
+## 3. 外部效应指标 (Contextual & External Effects)
+量化非选手自身因素的影响。
 
-### 3.1 `partner_avg_placement` (Partner Dividend Coefficient)
-*   **Definition**: The average final placement of the professional partner across all their historical seasons.
-*   **Calculation Logic**:
+### 3.1 `partner_avg_placement` (舞伴红利系数)
+*   **定义**：职业舞伴在历史上所有赛季的平均最终排名。
+*   **计算逻辑**：
     $$ \text{PartnerSkill}_p = \text{Mean}(\text{FinalPlacement}_{\text{all terms for } p}) $$
-*   **Interpretation**:
-    *   **Lower Value** (e.g., ~2.0 for Derek Hough): Indicates a top-tier partner; the contestant likely benefited from a "great partner" dividend.
-    *   **Higher Value**: Indicates a partner with an average track record.
+*   **解读**：
+    *   **低值**（如 Derek Hough 约为 2.0）：代表顶级舞伴；选手可能享受了“名师带飞”红利。
+    *   **高值**：代表舞伴历史战绩平平。
 
-### 3.2 `industry_prevalence` (Industry Heat)
-*   **Definition**: The frequency of the contestant's industry (e.g., Actor, Athlete) appearing in historical data. Used to measure if certain industries are "casting favorites."
-
----
-
-## 4. Fan Base Proxy Variables (观众影响力反代理)
-**(Core Innovation of This Model)**
-Since actual fan votes are unknown, we reverse-engineer the fan base size using "survival under adversity."
-
-### 4.1 `total_fan_saves_bottom1` (Escapes from Death)
-*   **Definition**: The number of times a contestant survived elimination despite being ranked **last (Bottom 1)** by judges.
-*   **Significance**: A signal of extreme fan effect. Only massive fan voting can offset the disadvantage of being last in judge scores.
-
-### 4.2 `total_fan_saves_bottom2` (Survival in Extreme Danger)
-*   **Definition**: The number of times a contestant survived despite being in the **bottom two (Bottom 2)** of judge rankings.
-*   **Significance**: A signal of strong fan effect.
-
-### 4.3 `total_fan_saves_bottom3` (Survival in Danger Zone)
-*   **Definition**: The number of times a contestant survived despite being in the **bottom three (Bottom 3)** of judge rankings.
-*   **Significance**: Indicates moderate fan effect or luck (since bottom three is often relatively safe).
+### 3.2 `industry_prevalence` (行业热度)
+*   **定义**：选手的行业（如 Actor, Athlete）在历史数据中出现的频率。用于衡量某些行业是否是“选角偏好”。
 
 ---
 
-## Summary: Why Are These Columns Crucial?
+## 4. 观众影响力反代理 (Fan Base Proxy Variables)
+**（本模型的核心创新点）**
+由于真实的粉丝投票未知，我们利用“逆境生存能力”来反推粉丝基数的大小。
 
-In the upcoming modeling (Problem C):
-1.  **Bayesian Vote Reconstruction**: `week{w}_judge_rank` will serve as our **Observed Variable** for constructing the likelihood function.
-2.  **Controversy Analysis**: We will filter contestants with `total_fan_saves_bottom1` > 0 (e.g., Bobby Bones) as key cases for "High Discrepancy" analysis.
-3.  **Model Prediction**: `partner_avg_placement` and `avg_judge_rank` will be input features for regression models to quantify the contribution of "skill" vs. "background" to the final ranking.
+### 4.1 `total_fan_saves_bottom1` (死里逃生次数)
+*   **定义**：选手在评委排名**倒数第一 (Bottom 1)** 的情况下，依然未被淘汰的次数。
+*   **意义**：极端粉丝效应的信号。只有巨大的粉丝投票才能抵消评委分倒数第一的劣势。
+
+### 4.2 `total_fan_saves_bottom2` (极度危险存活)
+*   **定义**：选手在评委排名**倒数前两名 (Bottom 2)** 的情况下，成功存活的次数。
+*   **意义**：强粉丝效应信号。
+
+### 4.3 `total_fan_saves_bottom3` (危险区存活)
+*   **定义**：选手在评委排名**倒数前三名 (Bottom 3)** 的情况下，成功存活的次数。
+*   **意义**：表示中等粉丝效应或运气（因为倒数第三通常相对安全）。
+
+---
+
+## 总结：为什么这些列至关重要？
+
+在接下来的建模（C题）中：
+1.  **贝叶斯投票重构**：`week{w}_judge_rank` 将作为构建似然函数的**已知观测变量 (Observed Variable)**。
+2.  **争议分析**：我们将筛选出 `total_fan_saves_bottom1` > 0 的选手（如 Bobby Bones）作为“巨大分歧”的重点案例进行分析。
+3.  **模型预测**：`partner_avg_placement` 和 `avg_judge_rank` 将作为回归模型的输入特征，以量化“实力”与“背景”对最终排名的贡献。
