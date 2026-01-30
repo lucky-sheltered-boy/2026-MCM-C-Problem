@@ -1,152 +1,86 @@
-# DWTS 粉丝投票估算系统
+# DWTS 粉丝投票反演系统 (MCM 2026 C题)
 
-基于贝叶斯MCMC方法的《与星共舞》粉丝投票逆向估算系统
+基于贝叶斯逆统计学 (Bayesian Inverse Statistics) 的《与星共舞》隐含投票数据重构系统。
 
-## 项目简介
+## 🚀 项目概览 (Project Overview)
 
-本项目针对2026 MCM C题，使用贝叶斯马尔可夫链蒙特卡洛(Bayesian MCMC)方法估算《与星共舞》节目中未公开的粉丝投票数据。系统能够：
+本项目专为 **2026 MCM Problem C** 设计，旨在解决从未观测的粉丝投票数据中反推淘汰结果这一“不适定逆问题” (Ill-posed Inverse Problem)。
 
-- ✅ 估算每周每位参赛者的粉丝投票份额
-- ✅ 提供估算结果的不确定性度量（HPDI、后验标准差等）
-- ✅ 验证模型与实际淘汰结果的一致性
-- ✅ 支持三种不同的投票规则（排名法、百分比法、Bottom Two机制）
-- ✅ 自动诊断MCMC收敛性（Gelman-Rubin统计量）
+该系统采用 **贝叶斯马尔可夫链蒙特卡洛 (MCMC)** 框架：
+1.  **重构历史**: 估算 34 个赛季中每一周、每位选手的粉丝投票概率分布。
+2.  **不确定性量化**: 用最高后验密度区间 (HPDI) 替代单一的点估计，以此来衡量我们对估算结果的“确信程度”。
+3.  **反事实推演**: 允许进行“如果...会怎样” (What-If) 分析，测试争议结果（如 Bobby Bones 夺冠）在不同规则下是否会改变。
 
-## 项目结构
+## 📂 项目结构 (Project Structure)
 
-```
+```bash
 .
-├── main.py                      # 主程序入口
-├── src/
-│   ├── data_loader.py          # 数据加载模块（使用预处理后的数据）
-│   ├── mcmc_sampler.py         # MCMC采样器
-│   └── diagnostics.py          # 模型诊断与验证
-├── 2026-MCM-C-Problem/         # 队友预处理数据（git clone）
-│   └── engineered_data.csv     # 预处理后的特征数据
-├── results/                     # 输出结果目录
-│   ├── estimation_results.pkl  # 估算结果
-│   ├── results_summary.json    # 结果摘要
-│   └── season_X_visualizations/ # 各赛季可视化
-├── test_modules.py             # 模块测试脚本
-└── README.md                    # 本文件
+├── 2026_MCM_Problem_C_Data.csv      # 美赛官方提供的原始数据集
+├── engineered_data.csv              # 经过特征工程处理的数据集 (自动生成)
+├── Data_Dictionary.md               # 新增特征的详细定义文档
+├── main.py                          # 单赛季估算模型的主程序入口
+├── main_hierarchical.py             # 高级层次贝叶斯模型的程序入口
+├── analyze_special_cases.py         # 用于提取历史淘汰真值的脚本
+├── src/                             # 核心源代码库
+│   ├── data_loader.py               # ETL 数据管道与博弈状态重构
+│   ├── mcmc_sampler.py              # Metropolis-Hastings MCMC 采样引擎
+│   ├── hierarchical_sampler.py      # 层次贝叶斯模型扩展
+│   └── diagnostics.py               # 收敛性检测工具 (R-hat, ESS)
+├── results/                         # 结果输出目录
+│   ├── estimation_results.pkl       # 序列化保存的 MCMC 链数据
+│   └── season_X_visualizations/     # 自动生成的用于论文的图表
+└── README.md                        # 本说明文件
 ```
 
-## 环境配置
+## 🧠 核心方法论 (Core Methodology)
 
-### 创建conda环境
-```bash
-conda create -n MCM python=3.11 -y
-conda activate MCM
-pip install numpy pandas scipy matplotlib seaborn
-```
+### 1. 贝叶斯逆建模 (Bayesian Inverse Modeling)
+我们将未知的粉丝得票 $F$ 视为潜变量 (Latent Variables)。
+*   **似然函数 $P(E|F, J)$**: 在给定我们的猜测票数 $F$ 和已知评委分 $J$ 的情况下，观察到真实淘汰结果 $E$ 的概率。如果某个猜测导致了错误的淘汰者，其概率会骤降至 0。
+*   **先验分布 $P(F)$**: 使用 `Dirichlet(α)` 先验来建模 $N$ 名选手之间的选票分布，确保 $\sum F_i = 1$。
 
-## 使用方法
+### 2. MCMC 约束满足 (Constraint Satisfaction)
+为了处理“所有得票占比之和必须为 100%”的单纯形约束，我们在采样的过程中使用了 **Logit 空间** 进行无约束漫步，并通过 Softmax 函数映射回单纯形空间。
+*   **采样器**: 自适应 Metropolis-Hastings 算法，带有多元高斯提议分布。
+*   **规则引擎**: 根据赛季自动切换淘汰逻辑：
+    *   **Rank Method** (S1-2, S28+): 评委排名 + 粉丝排名之和。
+    *   **Percent Method** (S3-27): 评委得分占比 + 粉丝投票占比。
+    *   **Judges' Save**: 针对“倒数前两名对决”的特殊逻辑。
 
-### 1. 准备数据
+### 3. 特征工程 (Feature Engineering)
+我们对原始数据进行了扩展，增加了 100+ 个新特征 (详见 `Data_Dictionary.md`)，包括：
+*   **`weekX_judge_rank`**: 标准化的竞赛排名。
+*   **`total_fan_saves_bottom1`**: 这是一个极高信噪比的“粉丝基数”代理变量——统计选手在评委打分倒数第一的情况下幸存的次数。
 
-确保 `2026-MCM-C-Problem/engineered_data.csv` 存在（已由队友预处理）。
+## 🛠️ 使用指南 (Usage)
 
-### 2. 运行完整分析
+###前置条件
+*   Python 3.10+
+*   依赖库: `numpy`, `pandas`, `scipy`, `matplotlib`, `seaborn`
 
-```bash
-conda activate MCM
-python main.py
-```
+### 快速启动
+1.  **数据预处理**: 系统会自动检查并生成 `engineered_data.csv`。
+2.  **运行估算**:
+    ```bash
+    python main.py
+    ```
+    这将针对默认赛季（如 Season 1）运行标准 MCMC 模型并生成诊断图表。
 
-这将执行：
-- 数据预处理
-- MCMC采样估算
-- 结果可视化
+3.  **层次化模型分析** (高级):
+    ```bash
+    python main_hierarchical.py
+    ```
+    运行层次模型，汇聚跨周/跨赛季的信息，以更鲁棒地估算“名人热度”参数。
 
-### 3. 自定义分析
+## 📊 输出与诊断 (Outputs & Diagnostics)
 
-```python
-from main import DWTSVotingEstimator
+系统会生成：
+*   **后验分布图**: 直方图展示每位明星可能的得票范围。
+*   **迹图 (Trace Plots)**: 用于视觉检查 MCMC 的混合情况。
+*   **收敛性指标**:
+    *   **R-hat (Gelman-Rubin)**: 值 < 1.1 表示链已收敛。
+    *   **接受率 (Acceptance Rate)**: 监控采样效率 (目标约为 23%)。
 
-# 初始化
-estimator = DWTSVotingEstimator("2026_MCM_Problem_C_Data.csv")
+## 📝 许可证 (License)
+MIT License. 仅供教育与竞赛目的使用。
 
-# 处理指定赛季
-estimator.load_and_process_data(seasons=[1, 2, 3])
-
-# 估算单个赛季
-estimator.estimate_season(season=1, n_chains=3)
-
-# 可视化结果
-estimator.visualize_season(season=1)
-```
-
-## 核心算法
-
-### Metropolis-Hastings采样
-
-1. **状态空间**: 使用Softmax变换确保粉丝投票份额和为1
-2. **似然函数**: 根据赛季规则动态选择（排名法/百分比法/Bottom Two）
-3. **先验分布**: Dirichlet(α=1.5) 先验
-4. **提议分布**: 在无约束空间添加高斯噪声
-
-### 收敛性诊断
-
-- **Gelman-Rubin统计量**: R-hat < 1.1 表示收敛
-- **有效样本量**: ESS评估独立样本数量
-- **后验预测检查**: 验证模型一致性
-
-### 不确定性度量
-
-- **95% HPDI**: 最高后验密度区间
-- **后验标准差**: 估算的变异性
-- **变异系数**: 标准化的不确定性度量
-
-## 输出说明
-
-### 1. 估算结果 (estimation_results.pkl)
-
-每周的估算结果包含：
-- `fan_votes_mean`: 粉丝投票份额的后验均值
-- `fan_votes_std`: 后验标准差
-- `fan_votes_hpdi`: 95% HPDI区间
-- `consistency_score`: 模型一致性分数
-- `r_hat`: Gelman-Rubin统计量
-- `converged`: 是否收敛
-
-### 2. 可视化图表
-
-- **consistency_trend.png**: 各周一致性趋势
-- **certainty_metrics.png**: 估算不确定性分析
-- **posterior_week_X.png**: 后验分布直方图
-
-## 方法论亮点
-
-1. **单纯形约束处理**: Softmax变换优雅地处理了概率和为1的约束
-2. **赛季规则适配**: 自动识别并应用不同赛季的投票规则
-3. **多链验证**: 运行多条MCMC链确保结果可靠性
-4. **完整诊断**: 提供全面的收敛性和不确定性分析
-
-## 技术特点
-
-- ✨ 模块化设计，易于扩展
-- ✨ 完整的错误处理和日志输出
-- ✨ 支持大规模数据（34赛季）处理
-- ✨ 自动生成专业级可视化
-- ✨ 结果可序列化存储和加载
-
-## 后续扩展
-
-可以在此基础上添加：
-- PyMC3/Stan集成（使用NUTS采样器加速）
-- 交互式可视化（Plotly）
-- 因素分析模型（名人特征、舞伴影响等）
-- 投票方法比较分析
-
-## 理论基础
-
-详细的数学推导和算法设计请参考：
-`Bayesian MCMC Modeling for Dancing with the Stars Voting Analysis.md`
-
-## 联系方式
-
-如有问题或建议，欢迎提出Issue。
-
-## 许可证
-
-MIT License
