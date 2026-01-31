@@ -217,24 +217,44 @@ class MCMCSampler:
         # 初始化无约束向量（从均匀分布开始）
         z_current = np.zeros(n_contestants)
         
+        # 寻找满足约束的初始点
+        found_valid_init = False
+        for _ in range(5000):
+            z_test = np.random.randn(n_contestants) * 0.5
+            fan_test = self.softmax_transform(z_test)
+            log_lik = likelihood_func(fan_test, judge_share, eliminated_idx)
+            if log_lik > -np.inf:
+                z_current = z_test
+                found_valid_init = True
+                break
+        
+        if not found_valid_init:
+            warnings.warn("无法找到满足约束的初始点，采样可能不稳定")
+        
         # MCMC采样
         samples = []
-        accepted = 0
+        accepted_burn_in = 0  # burn-in期间的接受次数
+        accepted_sampling = 0  # 采样期间的接受次数
         
         for i in range(self.n_iterations):
             z_current, is_accepted = self.metropolis_hastings_step(
                 z_current, judge_share, eliminated_idx, likelihood_func
             )
             
-            if is_accepted:
-                accepted += 1
-            
-            # Burn-in后开始保存样本（并进行抽稀）
-            if i >= self.burn_in and (i - self.burn_in) % self.thinning == 0:
-                fan_votes = self.softmax_transform(z_current)
-                samples.append(fan_votes)
+            if i < self.burn_in:
+                if is_accepted:
+                    accepted_burn_in += 1
+            else:
+                if is_accepted:
+                    accepted_sampling += 1
+                # Burn-in后开始保存样本（并进行抽稀）
+                if (i - self.burn_in) % self.thinning == 0:
+                    fan_votes = self.softmax_transform(z_current)
+                    samples.append(fan_votes)
         
-        self.acceptance_rate = accepted / self.n_iterations
+        # 只统计采样阶段的接受率
+        n_sampling_iterations = self.n_iterations - self.burn_in
+        self.acceptance_rate = accepted_sampling / n_sampling_iterations if n_sampling_iterations > 0 else 0.0
         self.samples = np.array(samples)
         
         return self.samples
@@ -301,7 +321,8 @@ class MCMCSampler:
         
         # MCMC采样
         samples = []
-        accepted = 0
+        accepted_burn_in = 0
+        accepted_sampling = 0
         
         for i in range(self.n_iterations):
             # 提议新状态
@@ -322,15 +343,22 @@ class MCMCSampler:
             
             log_acceptance_ratio = log_posterior_proposed - log_posterior_current
             
-            if log_acceptance_ratio > 0 or np.random.rand() < np.exp(log_acceptance_ratio):
+            is_accepted = log_acceptance_ratio > 0 or np.random.rand() < np.exp(log_acceptance_ratio)
+            if is_accepted:
                 z_current = z_proposed
-                accepted += 1
             
-            if i >= self.burn_in and (i - self.burn_in) % self.thinning == 0:
-                fan_votes = self.softmax_transform(z_current)
-                samples.append(fan_votes)
+            if i < self.burn_in:
+                if is_accepted:
+                    accepted_burn_in += 1
+            else:
+                if is_accepted:
+                    accepted_sampling += 1
+                if (i - self.burn_in) % self.thinning == 0:
+                    fan_votes = self.softmax_transform(z_current)
+                    samples.append(fan_votes)
         
-        self.acceptance_rate = accepted / self.n_iterations
+        n_sampling_iterations = self.n_iterations - self.burn_in
+        self.acceptance_rate = accepted_sampling / n_sampling_iterations if n_sampling_iterations > 0 else 0.0
         self.samples = np.array(samples)
         
         return self.samples
