@@ -61,7 +61,8 @@ class MCMCSampler:
     def calculate_log_likelihood_rank(self, fan_votes_share: np.ndarray, 
                                      judge_share: np.ndarray,
                                      eliminated_idx: int,
-                                     use_bottom_two: bool = False) -> float:
+                                     use_bottom_two: bool = False,
+                                     judge_ranks: np.ndarray = None) -> float:
         """
         计算排名法的对数似然
         
@@ -70,12 +71,18 @@ class MCMCSampler:
             judge_share: 评委得分份额
             eliminated_idx: 实际被淘汰选手的索引
             use_bottom_two: 是否使用Bottom Two机制（28-34赛季）
+            judge_ranks: 预计算的评委排名（可选，若提供则直接使用）
             
         Returns:
             对数似然值
         """
-        # 计算排名（rank越小越好，从1开始）
-        judge_rank = len(judge_share) + 1 - np.argsort(np.argsort(judge_share)) - 1
+        # 使用预计算的评委排名，或自行计算（兼容旧代码）
+        if judge_ranks is not None:
+            judge_rank = judge_ranks
+        else:
+            judge_rank = len(judge_share) + 1 - np.argsort(np.argsort(judge_share)) - 1
+        
+        # 计算粉丝排名（rank越小越好，从1开始）
         fan_rank = len(fan_votes_share) + 1 - np.argsort(np.argsort(fan_votes_share)) - 1
         
         # 综合排名（值越大越差）
@@ -190,7 +197,8 @@ class MCMCSampler:
     
     def sample_week(self, judge_share: np.ndarray,
                    eliminated_idx: int,
-                   voting_method: str) -> np.ndarray:
+                   voting_method: str,
+                   judge_ranks: np.ndarray = None) -> np.ndarray:
         """
         对单周进行MCMC采样估算粉丝投票
         
@@ -198,6 +206,7 @@ class MCMCSampler:
             judge_share: 评委得分份额（已归一化）
             eliminated_idx: 被淘汰选手在存活者中的索引
             voting_method: 投票方法 ('rank', 'percentage', 'rank_bottom2')
+            judge_ranks: 预计算的评委排名（可选，用于排名法）
             
         Returns:
             粉丝投票份额的后验样本 (n_samples × n_contestants)
@@ -206,11 +215,11 @@ class MCMCSampler:
         
         # 选择似然函数
         if voting_method == 'rank':
-            likelihood_func = lambda f, j, e: self.calculate_log_likelihood_rank(f, j, e, False)
+            likelihood_func = lambda f, j, e: self.calculate_log_likelihood_rank(f, j, e, False, judge_ranks)
         elif voting_method == 'percentage':
             likelihood_func = lambda f, j, e: self.calculate_log_likelihood_percentage(f, j, e)
         elif voting_method == 'rank_bottom2':
-            likelihood_func = lambda f, j, e: self.calculate_log_likelihood_rank(f, j, e, True)
+            likelihood_func = lambda f, j, e: self.calculate_log_likelihood_rank(f, j, e, True, judge_ranks)
         else:
             raise ValueError(f"未知的投票方法: {voting_method}")
         

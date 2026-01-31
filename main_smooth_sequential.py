@@ -1,0 +1,358 @@
+"""
+MCMC采样主程序 - 思路i：顺序生成平滑数据
+保证100%一致性的同时，最小化相邻周的变化
+"""
+
+import numpy as np
+import pandas as pd
+from pathlib import Path
+import sys
+import warnings
+
+warnings.filterwarnings('ignore')
+
+# 添加src到路径
+sys.path.insert(0, str(Path(__file__).parent / 'src'))
+
+from data_loader import DWTSDataLoader
+from mcmc_sampler import MCMCSampler
+from smooth_sampler import generate_consistent_sample
+
+
+def check_consistency(fan_votes: np.ndarray, judge_share: np.ndarray,
+                      eliminated_idx: int, voting_method: str,
+                      judge_ranks: np.ndarray = None) -> bool:
+    """检查粉丝投票是否满足一致性"""
+    if voting_method == 'percentage':
+        combined = 0.5 * judge_share + 0.5 * fan_votes
+        worst_idx = np.argmin(combined)
+        return worst_idx == eliminated_idx
+    elif voting_method in ['rank', 'rank_bottom2']:
+        n = len(fan_votes)
+        if judge_ranks is not None:
+            judge_rank = judge_ranks
+        else:
+            judge_rank = n + 1 - np.argsort(np.argsort(judge_share)) - 1
+        fan_rank = n + 1 - np.argsort(np.argsort(fan_votes)) - 1
+        total_rank = judge_rank + fan_rank
+        if voting_method == 'rank':
+            worst_idx = np.argmax(total_rank)
+            return worst_idx == eliminated_idx
+        else:
+            bottom_two = np.argsort(total_rank)[-2:]
+            return eliminated_idx in bottom_two
+    return False
+
+
+def calculate_smoothness_distance(prev_votes: np.ndarray, curr_votes: np.ndarray,
+                                  prev_names: list, curr_names: list) -> float:
+    """
+    计算两周投票分布之间的平滑距离
+    只比较共同存活的选手
+    
+    Args:
+        prev_votes: 上一周的投票份额
+        curr_votes: 本周的投票份额
+        prev_names: 上一周的选手名单
+        curr_names: 本周的选手名单
+        
+    Returns:
+        L2距离（归一化后）
+    """
+    # 找出共同的选手
+    common_names = set(prev_names) & set(curr_names)
+    
+    if len(common_names) == 0:
+        return float('inf')
+    
+    # 提取共同选手的投票份额
+    prev_common = []
+    curr_common = []
+    
+    for name in common_names:
+        prev_idx = prev_names.index(name)
+        curr_idx = curr_names.index(name)
+        prev_common.append(prev_votes[prev_idx])
+        curr_common.append(curr_votes[curr_idx])
+    
+    prev_common = np.array(prev_common)
+    curr_common = np.array(curr_common)
+    
+    # 归一化（因为共同选手的份额和不一定为1）
+    prev_norm = prev_common / (prev_common.sum() + 1e-10)
+    curr_norm = curr_common / (curr_common.sum() + 1e-10)
+    
+    # L2距离
+    return np.sqrt(np.sum((prev_norm - curr_norm) ** 2))
+
+
+def select_smoothest_sample(valid_samples: np.ndarray,
+                            prev_votes: np.ndarray,
+                            prev_names: list,
+                            curr_names: list) -> np.ndarray:
+    """
+    从有效样本中选择与上一周最平滑的一个
+    
+    Args:
+        valid_samples: 满足一致性的样本集合
+        prev_votes: 上一周的投票份额（None表示第一周）
+        prev_names: 上一周的选手名单
+        curr_names: 本周的选手名单
+        
+    Returns:
+        选中的样本
+    """
+    if prev_votes is None or len(valid_samples) == 1:
+        # 第一周：选择接近均值的样本
+        mean_sample = valid_samples.mean(axis=0)
+        distances = [np.sqrt(np.sum((s - mean_sample) ** 2)) for s in valid_samples]
+        return valid_samples[np.argmin(distances)]
+    
+    # 后续周：选择与上一周变化最小的
+    min_dist = float('inf')
+    best_sample = valid_samples[0]
+    
+    for sample in valid_samples:
+        dist = calculate_smoothness_distance(prev_votes, sample, prev_names, curr_names)
+        if dist < min_dist:
+            min_dist = dist
+            best_sample = sample
+    
+    return best_sample
+
+
+def process_season_smooth(season: int, loader: DWTSDataLoader, 
+                          sampler: MCMCSampler) -> dict:
+    """
+    处理单个赛季，使用顺序生成平滑方法
+    
+    思路i：
+    - 第1周：从满足一致性的MCMC样本中，选择接近均值的
+    - 第k周：从满足一致性的MCMC样本中，选择与第k-1周变化最小的
+    """
+    voting_method = loader.get_voting_method(season)
+    season_processed = loader.process_season(season)
+    
+    # 获取最大周数
+    max_week = season_processed['max_week']
+    
+    season_result = {
+        'season': season,
+        'voting_method': voting_method,
+        'weekly_results': [],
+        'total_weeks': 0,
+        'consistent_weeks': 0
+    }
+    
+    # 顺序处理每周，维护上一周的状态
+    prev_votes = None
+    prev_names = None
+    
+    for week in range(1, max_week + 1):
+        if week not in season_processed['weeks']:
+            continue
+        
+        week_data = season_processed['weeks'][week]
+        
+        # 跳过无淘汰周和决赛周
+        if week_data.get('is_no_elimination', False) and not week_data.get('is_finale', False):
+            continue
+        if week_data.get('is_finale', False):
+            continue
+        
+        judge_share = week_data['judge_share']
+        judge_ranks = week_data.get('judge_ranks', None)
+        survivor_names = week_data['survivor_names']
+        eliminated_indices = week_data.get('eliminated_indices_in_survivors', [])
+        
+        for elim_idx in eliminated_indices:
+            if elim_idx >= len(survivor_names):
+                continue
+            
+            eliminated_name = survivor_names[elim_idx]
+            
+            # 运行MCMC采样
+            try:
+                mcmc_samples = sampler.sample_week(judge_share, elim_idx, voting_method, judge_ranks)
+            except:
+                mcmc_samples = None
+            
+            # 筛选满足一致性的样本
+            valid_samples = []
+            if mcmc_samples is not None:
+                for s in mcmc_samples:
+                    if check_consistency(s, judge_share, elim_idx, voting_method, judge_ranks):
+                        valid_samples.append(s)
+            
+            if len(valid_samples) > 0:
+                valid_samples = np.array(valid_samples)
+                # 使用平滑选择策略
+                selected_votes = select_smoothest_sample(
+                    valid_samples, prev_votes, prev_names, survivor_names
+                )
+                method = 'mcmc_smooth'
+                is_consistent = True
+            else:
+                # 使用拒绝采样
+                selected_votes = generate_consistent_sample(
+                    judge_share, elim_idx, voting_method, 
+                    judge_ranks=judge_ranks, n_attempts=50000
+                )
+                if selected_votes is not None:
+                    method = 'rejection_sampling'
+                    is_consistent = True
+                else:
+                    selected_votes = np.ones(len(judge_share)) / len(judge_share)
+                    method = 'failed'
+                    is_consistent = False
+            
+            # 记录结果
+            week_result = {
+                'week': week,
+                'eliminated': eliminated_name,
+                'n_survivors': len(survivor_names),
+                'survivor_names': survivor_names,
+                'fan_votes': selected_votes,
+                'is_consistent': is_consistent,
+                'method': method,
+                'acceptance_rate': sampler.acceptance_rate if mcmc_samples is not None else 0.0
+            }
+            
+            season_result['weekly_results'].append(week_result)
+            season_result['total_weeks'] += 1
+            if is_consistent:
+                season_result['consistent_weeks'] += 1
+            
+            # 更新上一周状态（用于下一周的平滑）
+            prev_votes = selected_votes
+            prev_names = survivor_names
+    
+    # 计算一致性率
+    if season_result['total_weeks'] > 0:
+        season_result['consistency_rate'] = season_result['consistent_weeks'] / season_result['total_weeks']
+    else:
+        season_result['consistency_rate'] = 0.0
+    
+    return season_result
+
+
+def main():
+    print("=" * 70)
+    print("MCMC采样器 - 思路i：顺序生成平滑数据")
+    print("=" * 70)
+    
+    # 加载数据
+    data_path = Path(__file__).parent / "engineered_data.csv"
+    loader = DWTSDataLoader(str(data_path))
+    loader.load_data()
+    
+    sampler = MCMCSampler(n_iterations=10000, burn_in=2000, thinning=5, proposal_sigma=0.3)
+    
+    seasons = sorted(loader.raw_data['season'].unique())
+    all_results = []
+    
+    print(f"处理 {len(seasons)} 个赛季...")
+    print("-" * 70)
+    
+    method_counts = {}
+    
+    for season in seasons:
+        result = process_season_smooth(season, loader, sampler)
+        all_results.append(result)
+        
+        # 统计方法使用次数
+        for wr in result['weekly_results']:
+            method = wr['method']
+            method_counts[method] = method_counts.get(method, 0) + 1
+        
+        print(f"赛季 {season:2d}: {result['voting_method']:15s} | "
+              f"周数={result['total_weeks']:2d} | "
+              f"一致性={result['consistency_rate']:.1%}")
+    
+    # 汇总统计
+    print()
+    print("=" * 70)
+    print("汇总统计（思路i：顺序生成平滑）")
+    print("=" * 70)
+    
+    total_weeks = sum(r['total_weeks'] for r in all_results)
+    consistent_weeks = sum(r['consistent_weeks'] for r in all_results)
+    
+    print(f"总处理周数: {total_weeks}")
+    print(f"一致周数: {consistent_weeks}")
+    print(f"总体一致性: {consistent_weeks/total_weeks:.2%}")
+    
+    print()
+    print("各方法使用次数:")
+    for method, count in sorted(method_counts.items()):
+        print(f"  {method}: {count}")
+    
+    # 保存结果
+    output_path = Path(__file__).parent / "results" / "mcmc_smooth_results.csv"
+    
+    rows = []
+    for result in all_results:
+        for wr in result['weekly_results']:
+            rows.append({
+                'season': result['season'],
+                'voting_method': result['voting_method'],
+                'week': wr['week'],
+                'eliminated': wr['eliminated'],
+                'n_survivors': wr['n_survivors'],
+                'is_consistent': wr['is_consistent'],
+                'acceptance_rate': wr['acceptance_rate'],
+                'method': wr['method'],
+                'fan_votes_mean': str(wr['fan_votes'].tolist()),
+                'survivor_names': str(wr['survivor_names'])
+            })
+    
+    df_results = pd.DataFrame(rows)
+    df_results.to_csv(output_path, index=False)
+    print(f"\n结果已保存到: {output_path}")
+    
+    # 计算平滑程度
+    print()
+    print("=" * 70)
+    print("平滑程度评估")
+    print("=" * 70)
+    
+    all_changes = []
+    
+    for result in all_results:
+        prev_votes = None
+        prev_names = None
+        
+        for wr in result['weekly_results']:
+            curr_votes = wr['fan_votes']
+            curr_names = wr['survivor_names']
+            
+            if prev_votes is not None:
+                dist = calculate_smoothness_distance(prev_votes, curr_votes, prev_names, curr_names)
+                if dist < float('inf'):
+                    all_changes.append({
+                        'season': result['season'],
+                        'week': wr['week'],
+                        'change': dist,
+                        'n_survivors': wr['n_survivors']
+                    })
+            
+            prev_votes = curr_votes
+            prev_names = curr_names
+    
+    changes_df = pd.DataFrame(all_changes)
+    print(f"相邻周变化统计（归一化L2距离）:")
+    print(f"  样本数:   {len(changes_df)}")
+    print(f"  平均变化: {changes_df['change'].mean():.4f}")
+    print(f"  标准差:   {changes_df['change'].std():.4f}")
+    print(f"  最大变化: {changes_df['change'].max():.4f}")
+    print(f"  最小变化: {changes_df['change'].min():.4f}")
+    
+    print()
+    print("变化最大的10周:")
+    print(changes_df.nlargest(10, 'change')[['season', 'week', 'change', 'n_survivors']].to_string(index=False))
+    
+    return all_results
+
+
+if __name__ == "__main__":
+    results = main()

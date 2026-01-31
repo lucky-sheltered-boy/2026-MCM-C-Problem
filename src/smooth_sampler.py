@@ -31,7 +31,8 @@ class SmoothSampler:
         self.smoothness_weight = smoothness_weight
         
     def check_consistency(self, fan_votes: np.ndarray, judge_share: np.ndarray,
-                          eliminated_idx: int, voting_method: str) -> bool:
+                          eliminated_idx: int, voting_method: str,
+                          judge_ranks: np.ndarray = None) -> bool:
         """
         检查粉丝投票是否满足一致性（被淘汰者确实是最低）
         
@@ -40,6 +41,7 @@ class SmoothSampler:
             judge_share: 评委得分份额
             eliminated_idx: 被淘汰选手索引
             voting_method: 投票方法
+            judge_ranks: 预计算的评委排名（可选，用于排名法）
             
         Returns:
             是否满足一致性
@@ -51,7 +53,11 @@ class SmoothSampler:
             
         elif voting_method in ['rank', 'rank_bottom2']:
             n = len(fan_votes)
-            judge_rank = n + 1 - np.argsort(np.argsort(judge_share)) - 1
+            # 使用预计算的评委排名，或自行计算（兼容旧代码）
+            if judge_ranks is not None:
+                judge_rank = judge_ranks
+            else:
+                judge_rank = n + 1 - np.argsort(np.argsort(judge_share)) - 1
             fan_rank = n + 1 - np.argsort(np.argsort(fan_votes)) - 1
             total_rank = judge_rank + fan_rank  # 越大越差
             
@@ -263,6 +269,7 @@ class SmoothSampler:
 def generate_consistent_sample(judge_share: np.ndarray, 
                                eliminated_idx: int,
                                voting_method: str,
+                               judge_ranks: np.ndarray = None,
                                n_attempts: int = 10000) -> Optional[np.ndarray]:
     """
     直接生成一个满足一致性约束的粉丝投票样本
@@ -272,12 +279,19 @@ def generate_consistent_sample(judge_share: np.ndarray,
         judge_share: 评委得分份额
         eliminated_idx: 被淘汰选手索引
         voting_method: 投票方法
+        judge_ranks: 预计算的评委排名（可选，用于排名法）
         n_attempts: 最大尝试次数
         
     Returns:
         满足一致性的粉丝投票份额，或None（如果找不到）
     """
     n = len(judge_share)
+    
+    # 预计算评委排名（如果未提供）
+    if judge_ranks is not None:
+        judge_rank = judge_ranks
+    else:
+        judge_rank = n + 1 - np.argsort(np.argsort(judge_share)) - 1
     
     for _ in range(n_attempts):
         # 从Dirichlet分布采样
@@ -291,7 +305,6 @@ def generate_consistent_sample(judge_share: np.ndarray,
                 return fan_votes
                 
         elif voting_method == 'rank':
-            judge_rank = n + 1 - np.argsort(np.argsort(judge_share)) - 1
             fan_rank = n + 1 - np.argsort(np.argsort(fan_votes)) - 1
             total_rank = judge_rank + fan_rank
             worst_idx = np.argmax(total_rank)
@@ -299,7 +312,6 @@ def generate_consistent_sample(judge_share: np.ndarray,
                 return fan_votes
                 
         elif voting_method == 'rank_bottom2':
-            judge_rank = n + 1 - np.argsort(np.argsort(judge_share)) - 1
             fan_rank = n + 1 - np.argsort(np.argsort(fan_votes)) - 1
             total_rank = judge_rank + fan_rank
             bottom_two = np.argsort(total_rank)[-2:]
