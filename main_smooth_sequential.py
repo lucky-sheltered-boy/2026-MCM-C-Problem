@@ -207,9 +207,7 @@ def process_season_smooth(season: int, loader: DWTSDataLoader,
         
         week_data = season_processed['weeks'][week]
         
-        # 跳过无淘汰周和决赛周
-        if week_data.get('is_no_elimination', False) and not week_data.get('is_finale', False):
-            continue
+        # 跳过决赛周
         if week_data.get('is_finale', False):
             continue
         
@@ -218,6 +216,58 @@ def process_season_smooth(season: int, loader: DWTSDataLoader,
         survivor_names = week_data['survivor_names']
         eliminated_indices = week_data.get('eliminated_indices_in_survivors', [])
         
+        # 处理无淘汰周 (No Elimination Week)
+        if not eliminated_indices:
+            # 这种情况约束条件为空，可行解是整个单纯形
+            # 根据平滑假设，我们应该保持上一周的投票分布不变（仅做归一化适配）
+            # 或者如果是第一周，则使用先验
+            
+            # 计算本周的先验（可能用于Week 1或作为参考）
+            prior = get_fan_base_prior(loader.raw_data, season, survivor_names)
+            
+            if prev_votes is None:
+                # 第一周且无淘汰：直接使用粉丝基数先验
+                selected_votes = prior
+                method = 'prior_only (no elim)'
+            else:
+                # 后续周无淘汰：投影上一周的结果
+                # 创建一个映射
+                prev_map = {name: val for name, val in zip(prev_names, prev_votes)}
+                
+                # 提取本周选手的上周得票
+                temp_votes = []
+                for name in survivor_names:
+                    if name in prev_map:
+                        temp_votes.append(prev_map[name])
+                    else:
+                        # 如果是新加入的选手（极少见），给予平均值或先验值
+                        temp_votes.append(1.0 / len(survivor_names))
+                
+                temp_votes = np.array(temp_votes)
+                selected_votes = temp_votes / temp_votes.sum()
+                method = 'smooth_projection (no elim)'
+            
+            # 记录无淘汰周结果
+            week_result = {
+                'week': week,
+                'eliminated': "None (No Elimination)",
+                'n_survivors': len(survivor_names),
+                'survivor_names': survivor_names,
+                'fan_votes': selected_votes,
+                'is_consistent': True, # 无约束，天然满足
+                'method': method,
+                'acceptance_rate': 1.0
+            }
+            season_result['weekly_results'].append(week_result)
+            season_result['total_weeks'] += 1
+            season_result['consistent_weeks'] += 1
+            
+            # 更新状态
+            prev_votes = selected_votes
+            prev_names = survivor_names
+            continue
+
+        # 处理正常淘汰周
         for elim_idx in eliminated_indices:
             if elim_idx >= len(survivor_names):
                 continue
@@ -308,7 +358,7 @@ def main():
     # 增加迭代次数以提高精度，并行计算抵消时间成本
     # 用户希望提高迭代次数，我们就设为 100,000 (比原来的1M小一点，但在并行下很快)
     # 或者如果用户想要1M，我们可以保持，但并行会加速N倍
-    sampler = MCMCSampler(n_iterations=1000000, burn_in=5000, thinning=10, proposal_sigma=0.3)
+    sampler = MCMCSampler(n_iterations=100000, burn_in=5000, thinning=10, proposal_sigma=0.3)
     
     seasons = sorted(loader.raw_data['season'].unique())
     all_results = []

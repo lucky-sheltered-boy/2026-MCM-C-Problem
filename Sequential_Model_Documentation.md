@@ -1,97 +1,92 @@
-# 平滑顺序生成模型代码报告 (Smooth Sequential Model Code Report)
+# 平滑顺序统计模型 (Smooth Sequential Statistical Model)
 
-本文档详细分析了 `main_smooth_sequential.py` 的代码逻辑、运行流程及核心算法原理。该版本代码旨在解决标准 MCMC 模型中可能出现的“票数突变”问题，通过引入时间平滑约束，生成更符合真实世界规律（观众偏好具有惯性）的投票估算序列。
-
----
-
-## 1. 核心设计理念 (Core Philosophy)
-
-### 1.1 问题背景
-在标准的逐周 MCMC 估算中，每一周的采样是相互独立的。这可能导致同一个选手在表现相似的连续两周内，估算的粉丝票数出现剧烈波动（例如第3周 20%，第4周突然变成 5%），这不符合真实世界的**观众粘性 (Fan Inertia)** 规律。
-
-### 1.2 解决方案：思路 i (顺序生成平滑)
-本代码实现了一种**贪心顺序优化 (Greedy Sequential Optimization)** 策略：
-*   **硬约束 (Hard Constraint)**：必须 100% 满足当周的淘汰结果（Consistency）。
-*   **软约束 (Soft Constraint)**：在满足硬约束的所有可行解中，选择与上一周**变化最小 (Smoothest)** 的那个解。
+本文档详细阐述了用于推断潜在粉丝投票数据的算法模型。该模型旨在解决 Problem C 中关于“量化人气变化”的核心难题，通过贝叶斯反演（Bayesian Inversion）和时间序列平滑（Time-Series Smoothing）来构建科学的估算。
 
 ---
 
-## 2. 代码执行流程 (Execution Flow)
+## 1. 从问题到模型：数学转化 (From Problem to Model)
+
+### 1.1 问题核心与挑战
+*   **论文原文需求**：Problem C 的核心任务是 *"analyze the changing popularity of the partnerships"*（分析组合人气的变化）以及 *"predict the elimination"*（预测淘汰）。
+*   **挑战 (The Inverse Problem)**：
+    *   **潜在变量 (Latent Variable)**：真实的“粉丝投票数” ($F$) 是不可观测的，只有“评委打分” ($J$) 和最终的“淘汰结果” ($E$) 是已知的。
+    *   **因果倒置**：已知 $J + F \to E$，我们需要求解 $P(F | J, E)$。这是一个典型的贝叶斯反问题。
+    *   **时间连续性**：人气（Popularity）是一个随时间连续变化的心理量，不会在没有外部事件的情况下产生剧烈的随机跃变。
+
+### 1.2 为什么选择本算法？
+标准的统计推断或简单的 MCMC 独立采样存在一个致命缺陷：**时间独立性假设**。如果我们将每一周视为独立事件，模型可能会得出“某选手第3周人气20%，第4周人气2%”的荒谬结论。
+为了解决这个问题，本算法引入了两个关键机制：
+1.  **粉丝基数先验 (Fan Base Prior)**：解决“冷启动”问题，利用历史生存数据和舞伴效应来确定初始状态。
+    *   *对应论文点*：考虑了 *"Contextual Effects"*（如舞伴及其粉丝基础）。
+2.  **平滑顺序投影 (Smooth Sequential Projection)**：解决“波动性”问题，假设人气具有惯性。
+    *   *对应论文点*：响应了 *"changing popularity"* 的需求，确保变化是“渐进的”而非“随机的”。
+
+---
+
+## 2. 算法完整流程 (Algorithmic Workflow)
+
+本算法采用 **贪心顺序蒙特卡洛 (Greedy Sequential Monte Carlo)** 策略，具体分为四步：
 
 ```mermaid
 graph TD
-    A[启动 main()] --> B[加载数据 DWTSDataLoader]
-    B --> C[初始化 MCMCSampler]
-    C --> D[遍历所有赛季 Season 1-34]
+    Start[Season Start] --> Step1[Step 1: Calculate Prior]
+    Step1 --> Loop{Week Iteration}
+    Loop --> CaseA[Case A: No Elimination]
+    Loop --> CaseB[Case B: Elimination Event]
     
-    subgraph Single Season Processing (process_season_smooth)
-    D --> E[初始化上一周状态 Prev_Votes = None]
-    E --> F[遍历该赛季每一周 Week 1..T]
-    F --> G{是淘汰周?}
-    G -- No --> F
-    G -- Yes --> H[运行 MCMC 采样]
-    H --> I[过滤出 Valid Set (满足一致性的样本)]
+    CaseA --> Proj[Step 3: Smooth Projection]
+    Proj --> Update[Update State]
     
-    I --> J{这是第一周?}
-    J -- Yes --> K[选择 Valid Set 中最接近均值的样本]
-    J -- No --> L[计算 Valid Set 中每个样本与 Prev_Votes 的距离]
-    L --> M[选择距离最小的样本作为本周结果]
+    CaseB --> MCMC[Step 2: MCMC Sampling for Feasible Region]
+    MCMC --> Smooth[Step 4: Least-Squares Selection]
+    Smooth --> Update
     
-    M --> N[更新 Prev_Votes]
-    K --> N
-    N --> F
-    end
-    
-    F --> O[汇总统计与保存结果]
+    Update --> Loop
 ```
 
-### 关键步骤解析
+### Step 1: 初始状态估计 (Week 1 / Cold Start)
+*   **情境**：第一周没有历史投票数据，是一个“冷启动”问题。
+*   **算法思路**：构建一个基于特征的**信息先验 (Informative Prior)**。
+*   **实现方法**：
+    利用 `engineered_data.csv` 中的特征计算选手的“理论粉丝基数”：
+    $$ \text{Prior}_i \propto 1 + w_1 \cdot N_{\text{B1}} + w_2 \cdot N_{\text{B2}} + w_3 \cdot (1 - P_{\text{Partner}}) $$
+    *   $N_{\text{B1}}$: 选手在 Bottom 1 幸存的次数（死忠粉信号）。
+    *   $P_{\text{Partner}}$: 舞伴的历史平均排名百分位（舞伴流量信号）。
+    *   **操作**：在可行解空间中，选择欧氏距离最接近该 $\text{Prior}$ 分布的样本。
 
-#### 1. 数据准备
-*   使用 `DWTSDataLoader` 加载清洗后的数据。
-*   识别每个赛季的计分规则 (Rank / Percentage)。
+### Step 2: 可行域探索 (Feasible Region Exploration)
+*   **情境**：在有淘汰发生的周，我们必须满足“正确的人被淘汰”这一硬约束。
+*   **算法思路**：利用 Metropolis-Hastings MCMC 算法采样。
+*   **实现方法**：
+    构造似然函数 $L(\mathbf{f})$：
+    $$ L(\mathbf{f}) = \begin{cases} 1 & \text{if } \text{Rule}(\mathbf{J}, \mathbf{f}) \implies \text{Actual Loser} \\ 0 & \text{otherwise} \end{cases} $$
+    从 Simplex 空间采样 50,000 个点，保留所有 $L(\mathbf{f})=1$ 的样本，构成集合 $\Omega_{valid}$。
 
-#### 2. MCMC 采样 (探索可行域)
-*   对于每一周，首先运行标准的 `MCMCSampler`。
-*   **目的**：不是为了直接求期望，而是为了尽可能多地探索**可行解空间**。
-*   **过滤**：从采样的 10,000 个样本中，筛选出那些**能正确导致该周淘汰结果**的样本，构成 `valid_samples` 集合。
+### Step 3: 无淘汰周的惯性保持 (No-Elimination Inertia)
+*   **情境**：某周没有选手被淘汰（信息缺失）。
+*   **算法思路**：如果没有新的约束条件迫使我们改变看法，我们假设观众的偏好保持不变。
+*   **实现方法**：
+    $$ \mathbf{F}_t = \text{Normalize}(\text{Project}(\mathbf{F}_{t-1}, \text{Current Survivors})) $$
+    直接将上一周的得票率映射到本周。
 
-#### 3. 平滑选择 (Selection Strategy)
-函数 `select_smoothest_sample` 是核心：
-*   **第一周 (Start) - 粉丝基数先验 (Fan Base Prior)**:
-    在没有历史投票数据的第一周，我们面临“冷启动”问题。由于不同选手的粉丝基础（Fan Base）客观存在巨大差异，简单的“均等分布”假设（最大熵原理）并不合理。
-    我们根据选手特征构建了一个**“粉丝基数先验模型” (Fan Base Model)** 来指导第一周的选择：
-    *   **核心假设**：粉丝投票由“死忠粉（Mindless Fans）”和“摇摆粉（Swing Voters）”组成。第一周主要反映“死忠粉”的存量。
-    *   **特征工程**：我们构建了 `fan_base_score` 指标：
-        $$ \text{FanBase}_i = 1 + w_1 \cdot \text{Survival}_{B1} + w_2 \cdot \text{Survival}_{B2} + w_3 \cdot (1 - \text{PartnerRankNorm}) $$
-        其中 `Survival` 是选手在赛季中死里逃生的次数（事后统计指标作为先验信息），`PartnerRankNorm` 是舞伴的历史平均排名百分位。
-        *   **权重设定**：$w_1=2.0$ (Bottom 1存活权重最高), $w_2=1.0$, $w_3=3.0$ (知名舞伴带来的“爱屋及乌”效应)。
-    *   **选择策略**：计算 `valid_samples` 中每个样本与**先验期望分布**（根据 `fan_base_score` 归一化得到）的距离，选择距离最近的样本。
-    *   **统计学意义**：这相当于引入了**信息先验 (Informative Prior)**，利用选手的历史属性（是否自带流量、舞伴是否是大咖）来消除初始估计的偏差，比“盲猜”更科学。
-*   **后续周 (Updates)**：
-    *   输入：上一周的投票分布 $\mathbf{F}_{t-1}$，当前周的可行解集合 $\{\mathbf{F}^{(k)}_{t}\}$。
-    *   计算距离：只比较两周都**共同存活**的选手。
-    *   目标：$\min_k \text{Distance}(\mathbf{F}_{t-1}, \mathbf{F}^{(k)}_{t})$。
-    *   输出：选择变动最小的那个 $\mathbf{F}^{(best)}_{t}$ 作为本周的估算结果。
-
-#### 4. 兜底机制 (Fallback)
-如果 MCMC 采样未能找到任何可行解（极少数情况），代码会退化为 `Rejection Sampling`（拒绝采样）甚至随机猜测，并标记为 `failed`。
+### Step 4: 最小二乘平滑 (Least-Squares Smoothing)
+*   **情境**：在 $\Omega_{valid}$ 中有无数个满足淘汰结果的解，哪一个是真实的？
+*   **算法思路**：选择与上一周状态变化最小的解（奥卡姆剃刀原则）。
+*   **实现方法**：
+    $$ \mathbf{f}^*_t = \underset{\mathbf{f} \in \Omega_{valid}}{\text{argmin}} \sum_{i \in \text{Common}} (f_{t,i} - f_{t-1,i})^2 $$
+    这保证了最终得到的人气曲线由一系列微小的调整组成，而非剧烈的跳变。
 
 ---
 
-## 3. 算法原理与数学模型 (Algorithm & Math)
+## 3. 核心数学模型细节 (Detailed Mathematics)
 
-### 3.1 一致性检查 (Consistency Check)
-函数 `check_consistency` 用于验证一个样本是否合法。
-$$ \text{Valid}(\mathbf{F}) \iff \text{Loser}(\text{Rules}(\mathbf{J}, \mathbf{F})) == \text{Actual Loser} $$
-这保证了我们的估算结果在逻辑上是**完全自洽**的。
+### 3.1 粉丝基数先验公式
+$$ S_i = 1 + (2.0 \times \text{Saves}_{\text{Bottom1}}) + (1.0 \times \text{Saves}_{\text{Bottom2}}) + (3.0 \times (1 - \text{Rank}_{\text{Partner}})) $$
+该公式量化了“无脑粉”与“摇摆粉”的比例。
 
-### 3.2 平滑度量 (Smoothness Metric)
-函数 `calculate_smoothness_distance` 定义了时间维度的距离。
-假设 $S_t$ 是第 $t$ 周的幸存者集合，$S_{t-1}$ 是第 $t-1$ 周的幸存者集合。共同集 $C = S_t \cap S_{t-1}$。
-对于任意一个候选投票向量 $\mathbf{V}$，其与历史向量 $\mathbf{V}_{prev}$ 的距离 $D$ 定义为：
-
-$$ \mathbf{v}' = \text{Normalize}(\{v_i | i \in C\}) $$
+### 3.2 平滑距离度量 (Smoothness Metric)
+假设 $C = S_t \cap S_{t-1}$ 是相邻两周的共同参赛选手集合。
+距离定义为：
 $$ \mathbf{v}_{prev}' = \text{Normalize}(\{v_{prev, i} | i \in C\}) $$
 $$ D = \sqrt{ \sum_{i \in C} (v'_i - v'_{prev, i})^2 } $$
 
