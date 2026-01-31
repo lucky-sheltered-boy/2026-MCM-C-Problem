@@ -58,7 +58,16 @@ graph TD
 
 #### 3. 平滑选择 (Selection Strategy)
 函数 `select_smoothest_sample` 是核心：
-*   **第一周 (Start)**：没有历史包袱。选择 `valid_samples` 的**几何中心 (Centroid)**，即最接近平均分布的解，假设初始状态没有极端的偏好。
+*   **第一周 (Start) - 粉丝基数先验 (Fan Base Prior)**:
+    在没有历史投票数据的第一周，我们面临“冷启动”问题。由于不同选手的粉丝基础（Fan Base）客观存在巨大差异，简单的“均等分布”假设（最大熵原理）并不合理。
+    我们根据选手特征构建了一个**“粉丝基数先验模型” (Fan Base Model)** 来指导第一周的选择：
+    *   **核心假设**：粉丝投票由“死忠粉（Mindless Fans）”和“摇摆粉（Swing Voters）”组成。第一周主要反映“死忠粉”的存量。
+    *   **特征工程**：我们构建了 `fan_base_score` 指标：
+        $$ \text{FanBase}_i = 1 + w_1 \cdot \text{Survival}_{B1} + w_2 \cdot \text{Survival}_{B2} + w_3 \cdot (1 - \text{PartnerRankNorm}) $$
+        其中 `Survival` 是选手在赛季中死里逃生的次数（事后统计指标作为先验信息），`PartnerRankNorm` 是舞伴的历史平均排名百分位。
+        *   **权重设定**：$w_1=2.0$ (Bottom 1存活权重最高), $w_2=1.0$, $w_3=3.0$ (知名舞伴带来的“爱屋及乌”效应)。
+    *   **选择策略**：计算 `valid_samples` 中每个样本与**先验期望分布**（根据 `fan_base_score` 归一化得到）的距离，选择距离最近的样本。
+    *   **统计学意义**：这相当于引入了**信息先验 (Informative Prior)**，利用选手的历史属性（是否自带流量、舞伴是否是大咖）来消除初始估计的偏差，比“盲猜”更科学。
 *   **后续周 (Updates)**：
     *   输入：上一周的投票分布 $\mathbf{F}_{t-1}$，当前周的可行解集合 $\{\mathbf{F}^{(k)}_{t}\}$。
     *   计算距离：只比较两周都**共同存活**的选手。

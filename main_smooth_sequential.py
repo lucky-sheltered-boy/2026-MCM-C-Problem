@@ -8,6 +8,8 @@ import pandas as pd
 from pathlib import Path
 import sys
 import warnings
+import concurrent.futures
+import time
 
 warnings.filterwarnings('ignore')
 
@@ -17,6 +19,46 @@ sys.path.insert(0, str(Path(__file__).parent / 'src'))
 from data_loader import DWTSDataLoader
 from mcmc_sampler import MCMCSampler
 from smooth_sampler import generate_consistent_sample
+
+
+def get_fan_base_prior(df: pd.DataFrame, season: int, survivor_names: list) -> np.ndarray:
+    """
+    根据粉丝基数模型计算第一周的先验概率
+    
+    Formula: Score = 1 + 2*B1 + 1*B2 + 3*(1 - PartnerRank)
+    Args:
+        df: 包含 engineered features 的原始数据
+        season: 当前赛季
+        survivor_names: 当前仍存活的选手列表（第一周通常是所有人）
+    Returns:
+        归一化的先验概率向量
+    """
+    season_df = df[df['season'] == season]
+    scores = []
+    
+    for name in survivor_names:
+        # Get contestant row
+        row = season_df[season_df['celebrity_name'] == name]
+        if row.empty:
+            # Fallback if name mismatch (shouldn't happen with clean data)
+            scores.append(1.0)
+            continue
+            
+        row = row.iloc[0]
+        
+        # Extract features
+        b1 = row.get('total_fan_saves_bottom1', 0)
+        b2 = row.get('total_fan_saves_bottom2', 0)
+        partner_rank = row.get('partner_avg_placement', 0.5) # Default to mid if missing
+        
+        # Compute Score
+        # Note: partner_avg_placement is [0,1], lower is better (rank 1 is best).
+        # We want high score for good partner (low rank percentile).
+        score = 1.0 + (b1 * 2.0) + (b2 * 1.0) + (3.0 * (1.0 - partner_rank))
+        scores.append(score)
+        
+    scores = np.array(scores)
+    return scores / scores.sum() # Normalize
 
 
 def check_consistency(fan_votes: np.ndarray, judge_share: np.ndarray,
@@ -89,7 +131,8 @@ def calculate_smoothness_distance(prev_votes: np.ndarray, curr_votes: np.ndarray
 def select_smoothest_sample(valid_samples: np.ndarray,
                             prev_votes: np.ndarray,
                             prev_names: list,
-                            curr_names: list) -> np.ndarray:
+                            curr_names: list,
+                            prior_votes: np.ndarray = None) -> np.ndarray:
     """
     从有效样本中选择与上一周最平滑的一个
     
@@ -98,12 +141,19 @@ def select_smoothest_sample(valid_samples: np.ndarray,
         prev_votes: 上一周的投票份额（None表示第一周）
         prev_names: 上一周的选手名单
         curr_names: 本周的选手名单
+        prior_votes: 第一周的先验分布（可选）
         
     Returns:
         选中的样本
     """
     if prev_votes is None or len(valid_samples) == 1:
-        # 第一周：选择接近均值的样本
+        # 第一周
+        if prior_votes is not None:
+             # 选择距离先验最近的样本
+             distances = [np.sqrt(np.sum((s - prior_votes) ** 2)) for s in valid_samples]
+             return valid_samples[np.argmin(distances)]
+        
+        # Fallback: 重心法 (如果没有先验)
         mean_sample = valid_samples.mean(axis=0)
         distances = [np.sqrt(np.sum((s - mean_sample) ** 2)) for s in valid_samples]
         return valid_samples[np.argmin(distances)]
@@ -130,6 +180,9 @@ def process_season_smooth(season: int, loader: DWTSDataLoader,
     - 第1周：从满足一致性的MCMC样本中，选择接近均值的
     - 第k周：从满足一致性的MCMC样本中，选择与第k-1周变化最小的
     """
+    # 确保进程间的随机性不同，但结果可复现
+    np.random.seed(season * 999)
+    
     voting_method = loader.get_voting_method(season)
     season_processed = loader.process_season(season)
     
@@ -186,11 +239,17 @@ def process_season_smooth(season: int, loader: DWTSDataLoader,
             
             if len(valid_samples) > 0:
                 valid_samples = np.array(valid_samples)
+                
+                # 计算先验（仅第一周）
+                prior = None
+                if prev_votes is None:
+                    prior = get_fan_base_prior(loader.raw_data, season, survivor_names)
+
                 # 使用平滑选择策略
                 selected_votes = select_smoothest_sample(
-                    valid_samples, prev_votes, prev_names, survivor_names
+                    valid_samples, prev_votes, prev_names, survivor_names, prior_votes=prior
                 )
-                method = 'mcmc_smooth'
+                method = 'mcmc_smooth' if prev_votes is not None else 'mcmc_prior'
                 is_consistent = True
             else:
                 # 使用拒绝采样
@@ -246,28 +305,53 @@ def main():
     loader = DWTSDataLoader(str(data_path))
     loader.load_data()
     
-    sampler = MCMCSampler(n_iterations=10000, burn_in=2000, thinning=5, proposal_sigma=0.3)
+    # 增加迭代次数以提高精度，并行计算抵消时间成本
+    # 用户希望提高迭代次数，我们就设为 100,000 (比原来的1M小一点，但在并行下很快)
+    # 或者如果用户想要1M，我们可以保持，但并行会加速N倍
+    sampler = MCMCSampler(n_iterations=1000000, burn_in=5000, thinning=10, proposal_sigma=0.3)
     
     seasons = sorted(loader.raw_data['season'].unique())
     all_results = []
     
-    print(f"处理 {len(seasons)} 个赛季...")
+    print(f"处理 {len(seasons)} 个赛季 (并行模式)...")
+    print(f"MCMC设置: n={sampler.n_iterations}, burn={sampler.burn_in}, thin={sampler.thinning}")
     print("-" * 70)
     
     method_counts = {}
+    start_time = time.time()
     
-    for season in seasons:
-        result = process_season_smooth(season, loader, sampler)
-        all_results.append(result)
+    # 使用多进程并行处理赛季
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        # 提交所有任务
+        future_to_season = {
+            executor.submit(process_season_smooth, season, loader, sampler): season 
+            for season in seasons
+        }
         
-        # 统计方法使用次数
-        for wr in result['weekly_results']:
-            method = wr['method']
-            method_counts[method] = method_counts.get(method, 0) + 1
-        
-        print(f"赛季 {season:2d}: {result['voting_method']:15s} | "
-              f"周数={result['total_weeks']:2d} | "
-              f"一致性={result['consistency_rate']:.1%}")
+        # 获取结果（按照完成顺序）
+        for i, future in enumerate(concurrent.futures.as_completed(future_to_season)):
+            season = future_to_season[future]
+            try:
+                result = future.result()
+                all_results.append(result)
+                
+                # 统计方法使用次数
+                for wr in result['weekly_results']:
+                    method = wr['method']
+                    method_counts[method] = method_counts.get(method, 0) + 1
+                
+                elapsed = time.time() - start_time
+                print(f"[{i+1}/{len(seasons)}] 赛季 {season:2d}: {result['voting_method']:15s} | "
+                      f"一致性={result['consistency_rate']:.1%} | "
+                      f"耗时={elapsed:.1f}s")
+                      
+            except Exception as e:
+                print(f"赛季 {season} 处理出错: {e}")
+                import traceback
+                traceback.print_exc()
+
+    # 重新按赛季排序
+    all_results.sort(key=lambda x: x['season'])
     
     # 汇总统计
     print()

@@ -30,11 +30,11 @@
 ## 2. 赛季综合实力 (Season-Aggregated Metrics)
 这些指标构建了选手实力的综合画像。
 
-### 2.1 `avg_weekly_score` (平均输出强度)
-*   **定义**：选手在活跃期间的平均每周总分。
+### 2.1 `avg_judge_score` (单次评委平均打分)
+*   **定义**：选手在整个已进行周次内，所有评委给出的分数的算术平均值。
 *   **计算逻辑**：
-    $$ \bar{S}_i = \frac{1}{|W_{active}|} \sum_{w \in W_{active}} S_{i,w} $$
-    仅统计分数大于0的活跃周，避免淘汰周的“0分”拉低平均值。
+    $$ \bar{S}_i = \frac{\sum_{w \in W_{active}} \sum_{j=1}^{K_w} S_{i,w,j}}{\sum_{w \in W_{active}} K_w} $$
+    其中分母为该选手活跃期间所有评委打分次数的总和。该指标消除了不同周次评委人数不同（如3人或4人）带来的偏差。
 
 ### 2.2 `score_std_dev` (发挥稳定性)
 *   **定义**：选手周得分的标准差。
@@ -51,13 +51,15 @@
 ## 3. 外部效应指标 (Contextual & External Effects)
 量化非选手自身因素的影响。
 
-### 3.1 `partner_avg_placement` (舞伴红利系数)
-*   **定义**：职业舞伴在历史上所有赛季的平均最终排名。
+### 3.1 `partner_avg_placement` (舞伴红利系数 - 归一化)
+*   **定义**：职业舞伴在历史上所有赛季的平均**排名百分位 (Placement Percentile)**。
 *   **计算逻辑**：
-    $$ \text{PartnerSkill}_p = \text{Mean}(\text{FinalPlacement}_{\text{all terms for } p}) $$
+    首先计算单赛季归一化排名：
+    $$ P_{norm} = \frac{\text{Rank}}{\text{NumContestants}} $$
+    然后对该舞伴历史所有赛季求平均：
+    $$ \text{PartnerSkill}_p = \text{Mean}(P_{norm}) $$
 *   **解读**：
-    *   **低值**（如 Derek Hough 约为 2.0）：代表顶级舞伴；选手可能享受了“名师带飞”红利。
-    *   **高值**：代表舞伴历史战绩平平。
+    *   **范围**：$[0, 1]$。数值越小，代表舞伴平均战绩越接近冠军（Top Tier）。相比原始排名，消除了不同赛季参赛人数差异（如11人 vs 13人）造成的偏差。
 
 ### 3.2 `industry_prevalence` (行业热度)
 *   **定义**：选手的行业（如 Actor, Athlete）在历史数据中出现的频率。用于衡量某些行业是否是“选角偏好”。
