@@ -28,16 +28,133 @@ MCMC结果结构：
 import pickle
 import pandas as pd
 import numpy as np
+import ast
+from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
 
-def load_mcmc_results(filepath: str = 'results/estimation_results.pkl') -> dict:
-    """加载MCMC估计结果"""
-    with open(filepath, 'rb') as f:
-        return pickle.load(f)
+def load_mcmc_results_csv(filepath: str = 'results/mcmc_smooth_results.csv') -> dict:
+    """
+    从CSV加载MCMC平滑结果，转换为与旧pkl格式兼容的结构
+    
+    CSV格式:
+        season, voting_method, week, eliminated, n_survivors, is_consistent, 
+        acceptance_rate, method, fan_votes_mean, survivor_names
+    
+    返回格式 (兼容旧代码):
+        results[season][week] = {
+            'season': int,
+            'week': int,
+            'voting_method': str,
+            'survivor_names': list,
+            'judge_share': array,  # 需要从原始数据计算
+            'fan_votes_mean': array,
+            'eliminated_celebrity': str,
+            ...
+        }
+    """
+    df = pd.read_csv(filepath)
+    
+    # 加载工程化数据以获取评委分数
+    raw_df = pd.read_csv('engineered_data.csv')
+    
+    results = {}
+    
+    for _, row in df.iterrows():
+        season = row['season']
+        week = row['week']
+        
+        if season not in results:
+            results[season] = {}
+        
+        # 解析字符串格式的列表
+        try:
+            survivor_names = ast.literal_eval(row['survivor_names'])
+            fan_votes_mean = ast.literal_eval(row['fan_votes_mean'])
+        except:
+            continue
+        
+        # 计算评委份额
+        judge_share = calculate_judge_share(raw_df, season, week, survivor_names)
+        
+        # 处理淘汰信息
+        eliminated = row['eliminated']
+        if pd.isna(eliminated) or 'None' in str(eliminated) or 'No Elimination' in str(eliminated):
+            eliminated_celebrity = None
+            is_no_elimination = True
+        else:
+            eliminated_celebrity = eliminated
+            is_no_elimination = False
+        
+        results[season][week] = {
+            'season': season,
+            'week': week,
+            'voting_method': row['voting_method'],
+            'survivor_names': survivor_names,
+            'judge_share': np.array(judge_share) if judge_share else np.ones(len(survivor_names)) / len(survivor_names),
+            'fan_votes_mean': np.array(fan_votes_mean),
+            'eliminated_celebrity': eliminated_celebrity,
+            'is_no_elimination': is_no_elimination,
+            'is_finale': week >= 10 and len(survivor_names) <= 3,
+            'n_survivors': len(survivor_names)
+        }
+    
+    return results
 
-def load_raw_data(filepath: str = '2026_MCM_Problem_C_Data.csv') -> pd.DataFrame:
-    """加载原始数据"""
+
+def calculate_judge_share(raw_df: pd.DataFrame, season: int, week: int, 
+                          survivor_names: List[str]) -> List[float]:
+    """从engineered_data.csv计算评委分数份额"""
+    season_df = raw_df[raw_df['season'] == season]
+    
+    # 找到该周的评委分数列 (格式: week1_judge1_score, week1_judge2_score, ...)
+    judge_cols = [c for c in raw_df.columns if c.startswith(f'week{week}_judge') and c.endswith('_score')]
+    
+    scores = {}
+    for _, row in season_df.iterrows():
+        name = row['celebrity_name']
+        if name in survivor_names:
+            week_scores = []
+            for col in judge_cols:
+                val = row[col]
+                if pd.notna(val) and val > 0:
+                    week_scores.append(val)
+            if week_scores:
+                scores[name] = sum(week_scores)
+    
+    if not scores:
+        return None
+    
+    total = sum(scores.values())
+    if total == 0:
+        return None
+    
+    # 按survivor_names顺序返回份额
+    return [scores.get(name, 0) / total for name in survivor_names]
+
+
+def load_mcmc_results(filepath: str = 'results/estimation_results.pkl') -> dict:
+    """
+    加载MCMC估计结果 - 优先使用CSV，回退到pkl
+    """
+    csv_path = filepath.replace('estimation_results.pkl', 'mcmc_smooth_results.csv')
+    
+    # 优先使用CSV（更新、更小）
+    if Path(csv_path).exists():
+        print(f"  使用CSV格式: {csv_path}")
+        return load_mcmc_results_csv(csv_path)
+    
+    # 回退到pkl
+    if Path(filepath).exists():
+        print(f"  使用PKL格式: {filepath}")
+        with open(filepath, 'rb') as f:
+            return pickle.load(f)
+    
+    raise FileNotFoundError(f"找不到MCMC结果文件: {csv_path} 或 {filepath}")
+
+
+def load_raw_data(filepath: str = 'engineered_data.csv') -> pd.DataFrame:
+    """加载工程化数据（包含评委分数）"""
     return pd.read_csv(filepath)
 
 
