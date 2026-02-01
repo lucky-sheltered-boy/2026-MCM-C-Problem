@@ -493,9 +493,10 @@ def main():
         danger_pct = 0   # 百分比法下会被淘汰的周数
         
         for wr in celeb_weeks:
-            if wr['eliminated_by_rank'] == celeb:
+            # eliminated_by_rank 和 eliminated_by_pct 现在是列表
+            if celeb in wr['eliminated_by_rank']:
                 danger_rank += 1
-            if wr['eliminated_by_pct'] == celeb:
+            if celeb in wr['eliminated_by_pct']:
                 danger_pct += 1
         
         print(f"    参与周数: {len(celeb_weeks)}")
@@ -544,9 +545,10 @@ def main():
             # 评委排名在后50%，粉丝排名在前50%
             if j_rank > n / 2 and f_rank <= n / 2:
                 fan_favorite_cases += 1
-                if r['eliminated_by_rank'] != name:
+                # eliminated_by_rank 和 eliminated_by_pct 现在是列表
+                if name not in r['eliminated_by_rank']:
                     fan_favorite_survives_rank += 1
-                if r['eliminated_by_pct'] != name:
+                if name not in r['eliminated_by_pct']:
                     fan_favorite_survives_pct += 1
     
     if fan_favorite_cases > 0:
@@ -564,15 +566,96 @@ def main():
         else:
             print(f"\n  ★ 结论: 两种方法对粉丝的偏好程度相同")
     
+    # ═══════════════════════════════════════════════════════════════════════════
+    # STEP 7: 评委选择机制分析 (S28+)
+    # ═══════════════════════════════════════════════════════════════════════════
+    print("\n" + "─" * 80)
+    print("STEP 7: 评委从垫底两人中选择机制的影响分析")
+    print("─" * 80)
+    print("  从第28季起，淘汰流程改为: 先确定垫底两人，再由评委投票淘汰其一")
+    
+    rank_seasons = set(range(1, 3)) | set(range(28, 35))
+    s28_plus = [r for r in all_results if r['season'] >= 28]
+    
+    # 分析垫底两人机制的影响
+    judge_override_cases = 0  # 评委改变了结果的次数
+    judge_agreed_cases = 0     # 评委同意最低分者被淘汰
+    
+    for r in s28_plus:
+        # 计算两种方法下的垫底两人
+        rank_scores = [(name, r['rank_results'][name]['total_rank']) 
+                       for name in r['survivor_names']]
+        rank_scores.sort(key=lambda x: x[1], reverse=True)  # 高排名(差) 在前
+        bottom_two_rank = [x[0] for x in rank_scores[:2]]
+        
+        # 检查实际淘汰是否在垫底两人中
+        actual_elims = r['actual_eliminations']
+        for elim in actual_elims:
+            if elim in bottom_two_rank:
+                # 评委是否选择了排名更高(更差)的那个?
+                if elim == bottom_two_rank[0]:
+                    judge_agreed_cases += 1
+                else:
+                    judge_override_cases += 1
+    
+    total_s28_elims = judge_override_cases + judge_agreed_cases
+    if total_s28_elims > 0:
+        print(f"\n  S28-S34 淘汰总数: {total_s28_elims}")
+        print(f"  评委选择排名最低者: {judge_agreed_cases} ({judge_agreed_cases/total_s28_elims*100:.1f}%)")
+        print(f"  评委'挽救'排名最低者: {judge_override_cases} ({judge_override_cases/total_s28_elims*100:.1f}%)")
+        
+        print(f"\n  ★ 评委选择机制的效果:")
+        if judge_override_cases > 0:
+            print(f"    - 评委在 {judge_override_cases} 次中改变了纯投票结果")
+            print(f"    - 这给予评委最终决定权，平衡了粉丝投票的影响")
+        else:
+            print(f"    - 评委通常同意投票结果，机制作用有限")
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # STEP 8: 最终建议
+    # ═══════════════════════════════════════════════════════════════════════════
+    print("\n" + "─" * 80)
+    print("STEP 8: 对制作人的建议")
+    print("─" * 80)
+    
+    # 计算统计数据
+    total_weeks = len(all_results)
+    agree_weeks = sum(1 for r in all_results if r['methods_agree'])
+    disagree_rate = (total_weeks - agree_weeks) / total_weeks * 100
+    
+    print(f"""
+  ┌─────────────────────────────────────────────────────────────────────────────┐
+  │                           Q2 分析结论与建议                                  │
+  ├─────────────────────────────────────────────────────────────────────────────┤
+  │ 1. 两种方法的差异:                                                          │
+  │    • 在 {disagree_rate:.1f}% 的周中，两种方法产生不同淘汰结果                     │
+  │    • 百分比法略微更偏向粉丝投票 (+{diff:.1f}%)                                   │
+  │                                                                             │
+  │ 2. 争议选手分析:                                                             │
+  │    • Jerry Rice (S2): 粉丝排名#1-2, 两种方法下均不会被淘汰                    │
+  │    • Bristol Palin (S11): 粉丝排名#1, 两种方法下均不会被淘汰                  │
+  │    • Bobby Bones (S27): 粉丝排名#2, 仅在最后一周排名法下有淘汰风险            │
+  │    ★ 结论: 争议的根本原因是粉丝投票与评委分数的脱钩，而非方法选择             │
+  │                                                                             │
+  │ 3. 建议使用的方法:                                                           │
+  │    ★ 推荐使用【百分比法】                                                    │
+  │    理由:                                                                     │
+  │    a) 更透明: 粉丝知道自己的票"值多少"                                       │
+  │    b) 更公平: 避免了排名法中"一票之差=一名之差"的不合理放大效应              │
+  │    c) 更稳定: 历史上(S3-S27)运行良好                                         │
+  │                                                                             │
+  │ 4. 是否建议评委选择机制?                                                     │
+  │    ★ 建议【保留】评委从垫底两人中选择的机制                                  │
+  │    理由:                                                                     │
+  │    a) 给予专业评委最终话语权，平衡粉丝投票的潜在非理性                        │
+  │    b) 增加节目的戏剧性和悬念                                                 │
+  │    c) 为争议情况提供了安全阀                                                 │
+  └─────────────────────────────────────────────────────────────────────────────┘
+    """)
+    
     print("\n" + "=" * 80)
     print("分析完成!")
     print("=" * 80)
-    print("\n关键发现:")
-    print("  1. 评委分数是已知的(原始数据)，只有粉丝投票需要MCMC估计")
-    print("  2. 利用同一组数据(评委已知+粉丝估计)计算两种方法的反事实结果")
-    print("  3. 两种方法在94.2%的周产生相同淘汰结果")
-    print("  4. 第28季起的'评委选择机制'解释了所有预测不一致")
-    print("  5. 百分比法略微更偏向粉丝投票")
     
     return all_results, disagreements
 
