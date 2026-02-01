@@ -20,7 +20,7 @@ MCMC结果结构：
     'survivor_names': list,      # 该周存活选手
     'judge_share': array,        # 评委分数份额 (已知，从原始数据计算)
     'fan_votes_mean': array,     # 粉丝投票份额估计 (MCMC估计)
-    'eliminated_celebrity': str, # 实际淘汰选手
+    'eliminations': list,        # 实际淘汰选手
     ...
   }
 """
@@ -67,37 +67,55 @@ def load_mcmc_results_csv(filepath: str = 'results/mcmc_smooth_results.csv') -> 
         if season not in results:
             results[season] = {}
         
-        # 解析字符串格式的列表
-        try:
-            survivor_names = ast.literal_eval(row['survivor_names'])
-            fan_votes_mean = ast.literal_eval(row['fan_votes_mean'])
-        except:
-            continue
+        if week not in results[season]:        
+            # 解析字符串格式的列表
+            try:
+                survivor_names = ast.literal_eval(row['survivor_names'])
+                fan_votes_mean = ast.literal_eval(row['fan_votes_mean'])
+            except:
+                continue
+            
+            # 计算评委份额
+            judge_share = calculate_judge_share(raw_df, season, week, survivor_names)
+            
+            # 处理淘汰信息
+            eliminations = []
+            n_eliminations = 0
+            eliminated = row['eliminated']
+            if pd.isna(eliminated) or 'None' in str(eliminated) or 'No Elimination' in str(eliminated):
+                is_no_elimination = True
+            else:
+                eliminations.append(eliminated)
+                n_eliminations = n_eliminations + 1
+                is_no_elimination = False
+            
+            results[season][week] = {
+                'season': season,
+                'week': week,
+                'voting_method': row['voting_method'],
+                'survivor_names': survivor_names,
+                'judge_share': np.array(judge_share) if judge_share else np.ones(len(survivor_names)) / len(survivor_names),
+                'fan_votes_mean': np.array(fan_votes_mean),
+                'is_no_elimination': is_no_elimination,
+                'is_finale': week >= 10 and len(survivor_names) <= 3,
+                'n_survivors': len(survivor_names),
+                'eliminations': eliminations,
+                'n_eliminations': n_eliminations
+            }
         
-        # 计算评委份额
-        judge_share = calculate_judge_share(raw_df, season, week, survivor_names)
-        
-        # 处理淘汰信息
-        eliminated = row['eliminated']
-        if pd.isna(eliminated) or 'None' in str(eliminated) or 'No Elimination' in str(eliminated):
-            eliminated_celebrity = None
-            is_no_elimination = True
         else:
-            eliminated_celebrity = eliminated
-            is_no_elimination = False
+            eliminated = row['eliminated']
+            if pd.isna(eliminated) or 'None' in str(eliminated) or 'No Elimination' in str(eliminated):
+                results[season][week]['is_no_elimination'] = True
+            else:
+                results[season][week]['eliminations'].append(eliminated)
+                results[season][week]['n_eliminations'] += 1
+                results[season][week]['is_no_elimination'] = False
         
-        results[season][week] = {
-            'season': season,
-            'week': week,
-            'voting_method': row['voting_method'],
-            'survivor_names': survivor_names,
-            'judge_share': np.array(judge_share) if judge_share else np.ones(len(survivor_names)) / len(survivor_names),
-            'fan_votes_mean': np.array(fan_votes_mean),
-            'eliminated_celebrity': eliminated_celebrity,
-            'is_no_elimination': is_no_elimination,
-            'is_finale': week >= 10 and len(survivor_names) <= 3,
-            'n_survivors': len(survivor_names)
-        }
+
+        # print("+++++++++++++++++++++++++++++++++++++")
+        # print(results[season][week])
+        # print("-------------------------------------")
     
     return results
 
@@ -222,18 +240,31 @@ def calculate_percent_method(survivor_names: List[str],
     return results
 
 
-def get_eliminated_by_rank(rank_results: Dict[str, dict]) -> str:
+def get_eliminated_by_rank(rank_results: Dict[str, dict], n_eliminations: int) -> List[str]:
     """排名法：总排名最高（数字最大）者淘汰"""
-    return max(rank_results.keys(), key=lambda x: rank_results[x]['total_rank'])
+    tmp = sorted(rank_results.keys(),
+                 key=lambda x: rank_results[x]['fan_rank'],
+                 reverse=True)
+    sorted_celebs = sorted(rank_results.keys(), 
+                           key=lambda x: rank_results[x]['total_rank'], 
+                           reverse=True)
+    return sorted_celebs[:n_eliminations]
 
 
-def get_eliminated_by_percent(pct_results: Dict[str, dict]) -> str:
+def get_eliminated_by_percent(pct_results: Dict[str, dict], n_eliminations: int) -> List[str]:
     """百分比法：总百分比最低者淘汰"""
-    return min(pct_results.keys(), key=lambda x: pct_results[x]['total_pct'])
+    tmp = sorted(pct_results.keys(),
+                 key=lambda x: pct_results[x]['fan_pct'])
+    sorted_celebs = sorted(pct_results.keys(), 
+                           key=lambda x: pct_results[x]['total_pct'])
+    return sorted_celebs[:n_eliminations]
 
 
 def get_bottom_two_by_rank(rank_results: Dict[str, dict]) -> List[str]:
     """排名法获取垫底两人（总排名最高的两人）"""
+    tmp = sorted(rank_results.keys(),
+                 key=lambda x: rank_results[x]['fan_rank'],
+                 reverse=True)
     sorted_celebs = sorted(rank_results.keys(), 
                            key=lambda x: rank_results[x]['total_rank'], 
                            reverse=True)
@@ -242,6 +273,8 @@ def get_bottom_two_by_rank(rank_results: Dict[str, dict]) -> List[str]:
 
 def get_bottom_two_by_percent(pct_results: Dict[str, dict]) -> List[str]:
     """百分比法获取垫底两人（总百分比最低的两人）"""
+    tmp = sorted(pct_results.keys(),
+                 key=lambda x: pct_results[x]['fan_pct'])
     sorted_celebs = sorted(pct_results.keys(), 
                            key=lambda x: pct_results[x]['total_pct'])
     return sorted_celebs[:2]
@@ -257,7 +290,8 @@ def analyze_week(week_data: dict) -> Optional[dict]:
     survivor_names = week_data.get('survivor_names', [])
     judge_share = week_data.get('judge_share')
     fan_share = week_data.get('fan_votes_mean')
-    actual_eliminated = week_data.get('eliminated_celebrity')
+    actual_eliminations = week_data.get('eliminations')
+    n_eliminations = week_data.get('n_eliminations')
     
     if survivor_names is None or judge_share is None or fan_share is None:
         return None
@@ -274,12 +308,16 @@ def analyze_week(week_data: dict) -> Optional[dict]:
     pct_results = calculate_percent_method(survivor_names, judge_share, fan_share)
     
     # 获取淘汰结果
-    eliminated_rank = get_eliminated_by_rank(rank_results)
-    eliminated_pct = get_eliminated_by_percent(pct_results)
+    eliminated_rank = get_eliminated_by_rank(rank_results, n_eliminations)
+    eliminated_pct = get_eliminated_by_percent(pct_results, n_eliminations)
     
     # 获取垫底两人
     bottom_two_rank = get_bottom_two_by_rank(rank_results)
     bottom_two_pct = get_bottom_two_by_percent(pct_results)
+
+    methods_agree = sorted(eliminated_rank) == sorted(eliminated_pct)
+    rank_matches_actual = sorted(actual_eliminations) == sorted(eliminated_rank)
+    pct_matches_actual = sorted(actual_eliminations) == sorted(eliminated_pct)
     
     return {
         'season': week_data['season'],
@@ -291,13 +329,14 @@ def analyze_week(week_data: dict) -> Optional[dict]:
         'pct_results': pct_results,
         'eliminated_by_rank': eliminated_rank,
         'eliminated_by_pct': eliminated_pct,
-        'actual_eliminated': actual_eliminated,
+        'actual_eliminations': actual_eliminations,
+        'n_eliminations': n_eliminations,
         'bottom_two_rank': bottom_two_rank,
         'bottom_two_pct': bottom_two_pct,
-        'methods_agree': eliminated_rank == eliminated_pct,
+        'methods_agree': methods_agree,
         # 验证：我们的方法是否与实际淘汰一致
-        'rank_matches_actual': eliminated_rank == actual_eliminated,
-        'pct_matches_actual': eliminated_pct == actual_eliminated
+        'rank_matches_actual': rank_matches_actual,
+        'pct_matches_actual': pct_matches_actual
     }
 
 
@@ -332,12 +371,12 @@ def main():
         return None, None
     
     # 展示数据结构示例
-    print("\n  数据结构示例 (Season 1, Week 2):")
-    sample = mcmc_results[1][2]
-    print(f"    存活选手: {sample['survivor_names'][:3]}...")
-    print(f"    评委份额 (已知): {sample['judge_share'][:3].round(3)}...")
-    print(f"    粉丝份额 (MCMC估计): {sample['fan_votes_mean'][:3].round(3)}...")
-    print(f"    实际淘汰: {sample['eliminated_celebrity']}")
+    # print("\n  数据结构示例 (Season 1, Week 2):")
+    # sample = mcmc_results[1][2]
+    # print(f"    存活选手: {sample['survivor_names'][:3]}...")
+    # print(f"    评委份额 (已知): {sample['judge_share'][:3].round(3)}...")
+    # print(f"    粉丝份额 (MCMC估计): {sample['fan_votes_mean'][:3].round(3)}...")
+    # print(f"    实际淘汰: {sample['eliminated_celebritions']}")
     
     # 分析所有赛季所有周
     print("\n" + "─" * 80)
@@ -426,7 +465,7 @@ def main():
     print(f"  {'Season':>6} {'Week':>4} │ {'排名法淘汰':^20} │ {'百分比法淘汰':^20} │ {'实际淘汰':^20}")
     print(f"  {'─'*6} {'─'*4}─┼─{'─'*20}─┼─{'─'*20}─┼─{'─'*20}")
     for d in disagreements:
-        print(f"  {d['season']:6d} {d['week']:4d} │ {d['eliminated_by_rank']:^20} │ {d['eliminated_by_pct']:^20} │ {d['actual_eliminated']:^20}")
+        print(f"  {d['season']:6d} {d['week']:4d} │ {str(d['eliminated_by_rank']):^20} │ {str(d['eliminated_by_pct']):^20} │ {str(d['actual_eliminations']):^20}")
     
     # 分析争议案例
     print("\n" + "─" * 80)
@@ -436,7 +475,8 @@ def main():
         'Jerry Rice': 2,
         'Billy Ray Cyrus': 4,
         'Bristol Palin': 11,
-        'Bobby Bones': 27
+        'Bobby Bones': 27,
+        'Sailor Brinkley-Cook': 28
     }
     
     for celeb, season in controversial.items():
@@ -476,8 +516,8 @@ def main():
                 t_rank = rank_data.get('total_rank', '?')
                 t_pct = pct_data.get('total_pct', 0)
                 
-                elim_r = wr['eliminated_by_rank'][:15] if len(wr['eliminated_by_rank']) > 15 else wr['eliminated_by_rank']
-                elim_p = wr['eliminated_by_pct'][:15] if len(wr['eliminated_by_pct']) > 15 else wr['eliminated_by_pct']
+                elim_r = str(wr['eliminated_by_rank'])
+                elim_p = str(wr['eliminated_by_pct'])
                 
                 print(f"    {week:4d} │ {j_rank:^8} │ {f_rank:^8} │ {t_rank:^6} │ {t_pct:^8.1f} │ {elim_r:^15} │ {elim_p:^15}")
     
