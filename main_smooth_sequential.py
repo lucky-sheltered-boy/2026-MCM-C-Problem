@@ -1,6 +1,8 @@
 """
 MCMC采样主程序 - 思路i：顺序生成平滑数据
 保证100%一致性的同时，最小化相邻周的变化
+
+注意：Windows兼容版本，禁用多进程以避免pickle问题
 """
 
 import numpy as np
@@ -8,10 +10,16 @@ import pandas as pd
 from pathlib import Path
 import sys
 import warnings
-import concurrent.futures
 import time
+import os
 
 warnings.filterwarnings('ignore')
+
+# Windows多进程兼容性标志
+USE_MULTIPROCESSING = os.name != 'nt'  # Windows上禁用多进程
+
+if USE_MULTIPROCESSING:
+    import concurrent.futures
 
 # 添加src到路径
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
@@ -355,34 +363,59 @@ def main():
     loader = DWTSDataLoader(str(data_path))
     loader.load_data()
     
-    # 增加迭代次数以提高精度，并行计算抵消时间成本
-    # 用户希望提高迭代次数，我们就设为 100,000 (比原来的1M小一点，但在并行下很快)
-    # 或者如果用户想要1M，我们可以保持，但并行会加速N倍
-    sampler = MCMCSampler(n_iterations=100000, burn_in=5000, thinning=10, proposal_sigma=0.3)
+    # MCMC设置 - Windows上减少迭代次数以避免内存问题
+    n_iterations = 50000 if os.name == 'nt' else 100000
+    sampler = MCMCSampler(n_iterations=n_iterations, burn_in=5000, thinning=10, proposal_sigma=0.3)
     
     seasons = sorted(loader.raw_data['season'].unique())
     all_results = []
     
-    print(f"处理 {len(seasons)} 个赛季 (并行模式)...")
+    mode = "顺序模式" if os.name == 'nt' else "并行模式"
+    print(f"处理 {len(seasons)} 个赛季 ({mode})...")
     print(f"MCMC设置: n={sampler.n_iterations}, burn={sampler.burn_in}, thin={sampler.thinning}")
+    if os.name == 'nt':
+        print("注意: Windows系统，已禁用多进程以保证稳定性")
     print("-" * 70)
     
     method_counts = {}
     start_time = time.time()
     
-    # 使用多进程并行处理赛季
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        # 提交所有任务
-        future_to_season = {
-            executor.submit(process_season_smooth, season, loader, sampler): season 
-            for season in seasons
-        }
-        
-        # 获取结果（按照完成顺序）
-        for i, future in enumerate(concurrent.futures.as_completed(future_to_season)):
-            season = future_to_season[future]
+    # 根据操作系统选择处理方式
+    if USE_MULTIPROCESSING:
+        # macOS/Linux: 使用多进程并行处理
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            # 提交所有任务
+            future_to_season = {
+                executor.submit(process_season_smooth, season, loader, sampler): season 
+                for season in seasons
+            }
+            
+            # 获取结果（按照完成顺序）
+            for i, future in enumerate(concurrent.futures.as_completed(future_to_season)):
+                season = future_to_season[future]
+                try:
+                    result = future.result()
+                    all_results.append(result)
+                    
+                    # 统计方法使用次数
+                    for wr in result['weekly_results']:
+                        method = wr['method']
+                        method_counts[method] = method_counts.get(method, 0) + 1
+                    
+                    elapsed = time.time() - start_time
+                    print(f"[{i+1}/{len(seasons)}] 赛季 {season:2d}: {result['voting_method']:15s} | "
+                          f"一致性={result['consistency_rate']:.1%} | "
+                          f"耗时={elapsed:.1f}s")
+                          
+                except Exception as e:
+                    print(f"赛季 {season} 处理出错: {e}")
+                    import traceback
+                    traceback.print_exc()
+    else:
+        # Windows: 顺序处理，避免multiprocessing问题
+        for i, season in enumerate(seasons):
             try:
-                result = future.result()
+                result = process_season_smooth(season, loader, sampler)
                 all_results.append(result)
                 
                 # 统计方法使用次数
@@ -414,7 +447,13 @@ def main():
     
     print(f"总处理周数: {total_weeks}")
     print(f"一致周数: {consistent_weeks}")
-    print(f"总体一致性: {consistent_weeks/total_weeks:.2%}")
+    
+    if total_weeks > 0:
+        print(f"总体一致性: {consistent_weeks/total_weeks:.2%}")
+    else:
+        print("总体一致性: N/A (无有效周数)")
+        print("错误: 未能处理任何周数据，请检查数据文件和依赖项")
+        return all_results
     
     print()
     print("各方法使用次数:")
