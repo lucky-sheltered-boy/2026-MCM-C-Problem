@@ -567,49 +567,99 @@ def main():
             print(f"\n  ★ 结论: 两种方法对粉丝的偏好程度相同")
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # STEP 7: 评委选择机制分析 (S28+)
+    # STEP 7: 评委选择机制对争议选手的反事实分析
     # ═══════════════════════════════════════════════════════════════════════════
     print("\n" + "─" * 80)
-    print("STEP 7: 评委从垫底两人中选择机制的影响分析")
+    print("STEP 7: 如果加入评委选择机制，对争议选手会如何影响?")
     print("─" * 80)
-    print("  从第28季起，淘汰流程改为: 先确定垫底两人，再由评委投票淘汰其一")
+    print("  反事实假设: 在争议选手的赛季中，如果采用'评委从垫底两人中选择'机制")
+    print("  机制说明: 先用投票方法确定垫底两人，再由评委投票淘汰其一")
+    print("  评委偏好假设: 评委倾向于淘汰评委分数较低的选手")
     
-    rank_seasons = set(range(1, 3)) | set(range(28, 35))
-    s28_plus = [r for r in all_results if r['season'] >= 28]
+    # 针对同样的4个争议选手进行分析
+    print(f"\n  分析对象: {list(controversial.keys())}")
     
-    # 分析垫底两人机制的影响
-    judge_override_cases = 0  # 评委改变了结果的次数
-    judge_agreed_cases = 0     # 评委同意最低分者被淘汰
-    
-    for r in s28_plus:
-        # 计算两种方法下的垫底两人
-        rank_scores = [(name, r['rank_results'][name]['total_rank']) 
-                       for name in r['survivor_names']]
-        rank_scores.sort(key=lambda x: x[1], reverse=True)  # 高排名(差) 在前
-        bottom_two_rank = [x[0] for x in rank_scores[:2]]
+    for celeb, season in controversial.items():
+        print(f"\n  【{celeb}】 Season {season} - 评委选择机制反事实分析")
+        print(f"  " + "─" * 70)
         
-        # 检查实际淘汰是否在垫底两人中
-        actual_elims = r['actual_eliminations']
-        for elim in actual_elims:
-            if elim in bottom_two_rank:
-                # 评委是否选择了排名更高(更差)的那个?
-                if elim == bottom_two_rank[0]:
-                    judge_agreed_cases += 1
+        celeb_weeks = [r for r in all_results 
+                       if r['season'] == season and celeb in r['survivor_names']]
+        
+        if not celeb_weeks:
+            print(f"    无数据")
+            continue
+        
+        # 统计该选手在"评委选择机制"下的命运变化
+        saved_by_judge = 0      # 评委可以挽救的周数
+        eliminated_by_judge = 0  # 评委可以淘汰的周数
+        no_effect = 0           # 评委选择机制无影响（该选手不在垫底两人中）
+        
+        print(f"    {'Week':>4} │ {'该选手排名':^10} │ {'垫底两人':^30} │ {'评委分数排名':^12} │ {'评委可能的选择':^20}")
+        print(f"    {'─'*4}─┼─{'─'*10}─┼─{'─'*30}─┼─{'─'*12}─┼─{'─'*20}")
+        
+        for wr in celeb_weeks:
+            week = wr['week']
+            n = wr['n_contestants']
+            
+            # 用排名法计算垫底两人 (S28+采用的方法)
+            rank_scores = [(name, wr['rank_results'][name]['total_rank']) 
+                           for name in wr['survivor_names']]
+            rank_scores.sort(key=lambda x: x[1], reverse=True)  # 高排名(差) 在前
+            bottom_two = [x[0] for x in rank_scores[:2]]
+            
+            celeb_rank = wr['rank_results'][celeb]['total_rank']
+            celeb_judge_rank = wr['rank_results'][celeb]['judge_rank']
+            
+            # 判断该选手是否在垫底两人中
+            in_bottom_two = celeb in bottom_two
+            
+            if in_bottom_two:
+                # 评委会选择谁淘汰? 假设评委淘汰评委分数较低者
+                other = bottom_two[0] if bottom_two[1] == celeb else bottom_two[1]
+                other_judge_rank = wr['rank_results'][other]['judge_rank']
+                
+                # 评委分数排名越高(数字越小)越好
+                if celeb_judge_rank > other_judge_rank:
+                    # 该选手评委分数更差，评委会淘汰他
+                    eliminated_by_judge += 1
+                    judge_choice = f"淘汰 {celeb}"
+                elif celeb_judge_rank < other_judge_rank:
+                    # 该选手评委分数更好，评委会保他
+                    saved_by_judge += 1
+                    judge_choice = f"淘汰 {other}"
                 else:
-                    judge_override_cases += 1
-    
-    total_s28_elims = judge_override_cases + judge_agreed_cases
-    if total_s28_elims > 0:
-        print(f"\n  S28-S34 淘汰总数: {total_s28_elims}")
-        print(f"  评委选择排名最低者: {judge_agreed_cases} ({judge_agreed_cases/total_s28_elims*100:.1f}%)")
-        print(f"  评委'挽救'排名最低者: {judge_override_cases} ({judge_override_cases/total_s28_elims*100:.1f}%)")
+                    # 平局，假设对该选手无影响
+                    no_effect += 1
+                    judge_choice = "平局(不确定)"
+            else:
+                no_effect += 1
+                judge_choice = "不在垫底两人中"
+            
+            bottom_two_str = f"{bottom_two[0][:12]}, {bottom_two[1][:12]}"
+            print(f"    {week:4d} │ {celeb_rank:^10} │ {bottom_two_str:^30} │ {celeb_judge_rank:^12} │ {judge_choice:^20}")
         
-        print(f"\n  ★ 评委选择机制的效果:")
-        if judge_override_cases > 0:
-            print(f"    - 评委在 {judge_override_cases} 次中改变了纯投票结果")
-            print(f"    - 这给予评委最终决定权，平衡了粉丝投票的影响")
+        # 总结
+        total_weeks = len(celeb_weeks)
+        print(f"\n    ★ 评委选择机制对 {celeb} 的影响:")
+        print(f"      参与周数: {total_weeks}")
+        print(f"      进入垫底两人的周数: {saved_by_judge + eliminated_by_judge}")
+        if saved_by_judge + eliminated_by_judge > 0:
+            print(f"        - 评委可能挽救: {saved_by_judge} 周")
+            print(f"        - 评委可能淘汰: {eliminated_by_judge} 周")
+            if eliminated_by_judge > 0:
+                print(f"      ⚠ 如果早期有评委选择机制，{celeb} 可能在第 {eliminated_by_judge} 周被评委淘汰!")
+            else:
+                print(f"      ✓ 评委选择机制不会提前淘汰 {celeb}")
         else:
-            print(f"    - 评委通常同意投票结果，机制作用有限")
+            print(f"      ✓ {celeb} 从未进入垫底两人，评委选择机制对其无影响")
+    
+    # 总体结论
+    print(f"\n  " + "─" * 70)
+    print(f"  ★ 评委选择机制对争议选手的整体影响总结:")
+    print(f"    - 该机制给予评委'最后决定权'，可以推翻粉丝投票结果")
+    print(f"    - 对于评委分数低但粉丝投票高的选手(如Bobby Bones)，该机制可能导致他们更早被淘汰")
+    print(f"    - 这正是S28后引入该机制的原因: 防止'Bobby Bones式争议'再次发生")
     
     # ═══════════════════════════════════════════════════════════════════════════
     # STEP 8: 最终建议
@@ -627,29 +677,35 @@ def main():
   ┌─────────────────────────────────────────────────────────────────────────────┐
   │                           Q2 分析结论与建议                                  │
   ├─────────────────────────────────────────────────────────────────────────────┤
-  │ 1. 两种方法的差异:                                                          │
+  │ 1. 两种方法的差异 (STEP 2-4):                                               │
   │    • 在 {disagree_rate:.1f}% 的周中，两种方法产生不同淘汰结果                     │
-  │    • 百分比法略微更偏向粉丝投票 (+{diff:.1f}%)                                   │
+  │    • 百分比法略微更偏向粉丝投票 (+{diff:.1f}%) (STEP 6)                          │
   │                                                                             │
-  │ 2. 争议选手分析:                                                             │
-  │    • Jerry Rice (S2): 粉丝排名#1-2, 两种方法下均不会被淘汰                    │
-  │    • Bristol Palin (S11): 粉丝排名#1, 两种方法下均不会被淘汰                  │
-  │    • Bobby Bones (S27): 粉丝排名#2, 仅在最后一周排名法下有淘汰风险            │
+  │ 2. 争议选手分析 (STEP 5):                                                    │
+  │    • Jerry Rice (S2): 评委分数低但粉丝排名高，两种方法下均存活到决赛         │
+  │    • Billy Ray Cyrus (S4): 类似情况，粉丝支持使其获得第5名                   │
+  │    • Bristol Palin (S11): 粉丝排名#1，两种方法下均不会被淘汰                 │
+  │    • Bobby Bones (S27): 粉丝排名#2，依靠粉丝投票赢得冠军                     │
   │    ★ 结论: 争议的根本原因是粉丝投票与评委分数的脱钩，而非方法选择             │
   │                                                                             │
-  │ 3. 建议使用的方法:                                                           │
+  │ 3. 评委选择机制对争议选手的影响 (STEP 7):                                    │
+  │    • 如果对Jerry Rice等采用评委选择机制，评委可能更早淘汰他们                │
+  │    • 该机制赋予评委"最后决定权"，可推翻纯粉丝投票的结果                      │
+  │    • 这正是S28后引入该机制的设计目的: 防止争议情况再现                       │
+  │                                                                             │
+  │ 4. 建议使用的方法:                                                           │
   │    ★ 推荐使用【百分比法】                                                    │
   │    理由:                                                                     │
   │    a) 更透明: 粉丝知道自己的票"值多少"                                       │
   │    b) 更公平: 避免了排名法中"一票之差=一名之差"的不合理放大效应              │
   │    c) 更稳定: 历史上(S3-S27)运行良好                                         │
   │                                                                             │
-  │ 4. 是否建议评委选择机制?                                                     │
+  │ 5. 是否建议评委选择机制?                                                     │
   │    ★ 建议【保留】评委从垫底两人中选择的机制                                  │
   │    理由:                                                                     │
   │    a) 给予专业评委最终话语权，平衡粉丝投票的潜在非理性                        │
-  │    b) 增加节目的戏剧性和悬念                                                 │
-  │    c) 为争议情况提供了安全阀                                                 │
+  │    b) 可有效防止"Bobby Bones式争议"再次发生                                  │
+  │    c) 增加节目的戏剧性和悬念                                                 │
   └─────────────────────────────────────────────────────────────────────────────┘
     """)
     
