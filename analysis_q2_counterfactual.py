@@ -363,30 +363,41 @@ def main():
     print(f"  分析周数: {len(all_results)}")
     print(f"  两种方法结果不同: {len(disagreements)} 周 ({len(disagreements)/len(all_results)*100:.1f}%)")
     
-    # 验证MCMC结果的一致性
+    # 按赛季展示两种方法的淘汰结果对比
     print("\n" + "─" * 80)
-    print("STEP 3: 验证MCMC估计的一致性")
+    print("STEP 3: 各赛季两种方法淘汰结果对比")
     print("─" * 80)
-    print("  检验: 使用MCMC粉丝投票 + 实际使用的结合方法 → 是否与实际淘汰一致?")
+    print("  对每一周，分别用排名法和百分比法计算淘汰者，比较是否一致")
     
-    # 按实际使用的方法分组验证
     rank_seasons = set(range(1, 3)) | set(range(28, 35))  # 1-2, 28-34
     pct_seasons = set(range(3, 28))  # 3-27
     
-    rank_correct = sum(1 for r in all_results if r['season'] in rank_seasons and r['rank_matches_actual'])
-    rank_total = sum(1 for r in all_results if r['season'] in rank_seasons)
+    # 按赛季统计
+    season_stats = defaultdict(lambda: {'total': 0, 'agree': 0, 'disagree': 0})
+    for r in all_results:
+        s = r['season']
+        season_stats[s]['total'] += 1
+        if r['methods_agree']:
+            season_stats[s]['agree'] += 1
+        else:
+            season_stats[s]['disagree'] += 1
     
-    pct_correct = sum(1 for r in all_results if r['season'] in pct_seasons and r['pct_matches_actual'])
-    pct_total = sum(1 for r in all_results if r['season'] in pct_seasons)
+    print(f"\n  ┌{'─'*70}┐")
+    print(f"  │ {'Season':^8} │ {'实际使用':^10} │ {'总周数':^6} │ {'方法一致':^8} │ {'方法不同':^8} │ {'一致率':^10} │")
+    print(f"  ├{'─'*70}┤")
     
-    print(f"\n  ┌{'─'*50}┐")
-    print(f"  │ 赛季范围      │ 实际方法  │ 一致率              │")
-    print(f"  ├{'─'*50}┤")
-    if rank_total > 0:
-        print(f"  │ S1-2, S28-34  │ 排名法    │ {rank_correct}/{rank_total} = {rank_correct/rank_total*100:.1f}%{' '*(10-len(str(rank_correct))-len(str(rank_total)))}│")
-    if pct_total > 0:
-        print(f"  │ S3-27         │ 百分比法  │ {pct_correct}/{pct_total} = {pct_correct/pct_total*100:.1f}%{' '*(9-len(str(pct_correct))-len(str(pct_total)))}│")
-    print(f"  └{'─'*50}┘")
+    for season in sorted(season_stats.keys()):
+        stats = season_stats[season]
+        actual_method = '排名法' if season in rank_seasons else '百分比法'
+        agree_rate = stats['agree'] / stats['total'] * 100 if stats['total'] > 0 else 0
+        print(f"  │ {season:^8} │ {actual_method:^10} │ {stats['total']:^6} │ {stats['agree']:^8} │ {stats['disagree']:^8} │ {agree_rate:^9.1f}% │")
+    
+    print(f"  └{'─'*70}┘")
+    
+    # 总体统计
+    total_weeks = len(all_results)
+    agree_weeks = sum(1 for r in all_results if r['methods_agree'])
+    print(f"\n  总计: {agree_weeks}/{total_weeks} 周两种方法结果一致 ({agree_weeks/total_weeks*100:.1f}%)")
     
     # 分析两种方法的差异
     print("\n" + "─" * 80)
