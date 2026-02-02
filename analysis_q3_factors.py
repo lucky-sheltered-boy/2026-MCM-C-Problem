@@ -7,6 +7,7 @@
 2. 名人行业 (celebrity_industry) - 独热编码
 3. 年龄 (celebrity_age_during_season)
 4. 赛季 (season)
+5. 地区因素 (celebrity_homecountry/region, celebrity_homestate) - 新增
 
 核心问题：这些因素对评委评分和粉丝投票的影响方式相同吗？
 """
@@ -86,6 +87,65 @@ def load_and_prepare_data():
     n_global = (df['partner_n_celebs_loo'] == 0).sum()
     print(f"使用全局均值填充: {n_global} 位名人（其partner只出场1次）")
     
+    # 处理地区因素
+    print("\n" + "-" * 50)
+    print("处理地区因素...")
+    
+    # 1. 是否为美国本土选手
+    df['is_usa'] = (df['celebrity_homecountry/region'] == 'United States').astype(int)
+    n_usa = df['is_usa'].sum()
+    print(f"美国本土选手: {n_usa} 位 ({n_usa/len(df)*100:.1f}%)")
+    
+    # 2. 处理美国州 - 分为几大区域
+    def get_us_region(state):
+        if pd.isna(state):
+            return 'Unknown'
+        
+        west = ['California', 'Oregon', 'Washington', 'Nevada', 'Arizona', 
+                'Utah', 'Colorado', 'New Mexico', 'Hawaii', 'Alaska', 
+                'Wyoming', 'Montana', 'Idaho']
+        south = ['Texas', 'Florida', 'Georgia', 'Alabama', 'Louisiana', 
+                 'Mississippi', 'Tennessee', 'Kentucky', 'Arkansas', 
+                 'North Carolina', 'South Carolina', 'Virginia', 'West Virginia',
+                 'Oklahoma', 'Maryland', 'Delaware']
+        midwest = ['Illinois', 'Ohio', 'Michigan', 'Indiana', 'Wisconsin', 
+                   'Minnesota', 'Iowa', 'Missouri', 'Kansas', 'Nebraska', 
+                   'North Dakota', 'South Dakota']
+        northeast = ['New York', 'Pennsylvania', 'New Jersey', 'Massachusetts', 
+                     'Connecticut', 'Rhode Island', 'Vermont', 'New Hampshire', 
+                     'Maine']
+        
+        if state in west:
+            return 'West'
+        elif state in south:
+            return 'South'
+        elif state in midwest:
+            return 'Midwest'
+        elif state in northeast:
+            return 'Northeast'
+        else:
+            return 'Other'
+    
+    df['us_region'] = df['celebrity_homestate'].apply(get_us_region)
+    
+    # 统计各区域分布
+    region_counts = df[df['is_usa'] == 1]['us_region'].value_counts()
+    print("\n美国选手按区域分布:")
+    for region, count in region_counts.items():
+        print(f"  {region}: {count} 位")
+    
+    # 3. 加州效应（好莱坞效应）
+    df['is_california'] = (df['celebrity_homestate'] == 'California').astype(int)
+    n_ca = df['is_california'].sum()
+    print(f"\n加州选手: {n_ca} 位 ({n_ca/len(df)*100:.1f}%) - 可能存在好莱坞效应")
+    
+    # 4. 国际选手细分
+    intl_counts = df[df['is_usa'] == 0]['celebrity_homecountry/region'].value_counts()
+    print(f"\n国际选手: {len(df) - n_usa} 位")
+    print("主要来源国家:")
+    for country, count in intl_counts.head(5).items():
+        print(f"  {country}: {count} 位")
+    
     return df, partner_stats
 
 
@@ -138,13 +198,19 @@ def prepare_features(df, target_col):
     """准备特征矩阵"""
     df_valid = df[df[target_col].notna()].copy()
     
+    # 数值特征 - 添加地区相关特征
     numeric_features = ['celebrity_age_during_season', 'season', 
-                        'partner_hist_score_mean_loo', 'partner_hist_placement_loo', 'partner_n_celebs_loo']
+                        'partner_hist_score_mean_loo', 'partner_hist_placement_loo', 'partner_n_celebs_loo',
+                        'is_usa', 'is_california']
     
+    # 行业独热编码
     industry_dummies = pd.get_dummies(df_valid['celebrity_industry'], prefix='industry')
     
+    # 美国区域独热编码 (仅对美国选手有意义)
+    region_dummies = pd.get_dummies(df_valid['us_region'], prefix='region')
+    
     X_numeric = df_valid[numeric_features].fillna(df_valid[numeric_features].median())
-    X = pd.concat([X_numeric, industry_dummies], axis=1)
+    X = pd.concat([X_numeric, industry_dummies, region_dummies], axis=1)
     y = df_valid[target_col].values
     
     return X, y, df_valid, numeric_features
@@ -210,6 +276,21 @@ def compare_judge_vs_fan(judge_coef, fan_coef, numeric_features, judge_cv, fan_c
     
     print("-" * 70)
     
+    # 地区效应对比
+    print("\n【地区效应对比】")
+    print("-" * 70)
+    
+    region_features = ['region_West', 'region_South', 'region_Midwest', 'region_Northeast', 'region_Other', 'region_Unknown']
+    print(f"\n{'美国区域':<35} {'评委评分':>15} {'粉丝投票':>15}")
+    print("-" * 70)
+    for feat in region_features:
+        judge_val = judge_coef[judge_coef['feature'] == feat]['coefficient'].values
+        fan_val = fan_coef[fan_coef['feature'] == feat]['coefficient'].values
+        j = judge_val[0] if len(judge_val) > 0 else 0
+        f = fan_val[0] if len(fan_val) > 0 else 0
+        region_name = feat.replace('region_', '')
+        print(f"{region_name:<35} {j:>15.4f} {f:>15.4f}")
+    
     # 行业效应对比
     print("\n【行业效应对比】")
     
@@ -248,14 +329,20 @@ def print_conclusions(judge_cv, fan_cv):
    - 对评委评分：显著正向影响（优秀Partner提升评分）
    - 对粉丝投票：几乎无影响（粉丝不关心Partner是谁）
 
-4. 行业效应
+4. 地区效应 (新增)
+   - is_usa: 美国本土vs国际选手的差异
+   - is_california: 加州选手可能有好莱坞知名度优势
+   - us_region: 不同区域可能有不同的粉丝基础
+   - 假设：南部/中西部选手可能有更强的本土粉丝支持
+
+5. 行业效应
    - 对评委评分：部分行业有显著影响（如社交媒体明星得分更高）
    - 对粉丝投票：行业影响极弱
 
-5. 结论
+6. 结论
    - 评委评分主要由"舞蹈能力相关因素"驱动（年龄、Partner、行业）
-   - 粉丝投票由"难以量化的个人魅力因素"驱动（知名度、人气、当周表演等）
-   - 这解释了为何评委评分和粉丝投票经常出现分歧
+   - 粉丝投票由"难以量化的个人魅力因素"驱动（知名度、人气、地区粉丝基础等）
+   - 地区因素可能对粉丝投票有一定影响（有待验证）
 """)
 
 
