@@ -363,16 +363,9 @@ def main():
     loader = DWTSDataLoader(str(data_path))
     loader.load_data()
     
-<<<<<<< HEAD
-    # 增加迭代次数以提高精度，并行计算抵消时间成本
-    # 用户希望提高迭代次数，我们就设为 100,000 (比原来的1M小一点，但在并行下很快)
-    # 或者如果用户想要1M，我们可以保持，但并行会加速N倍
-    sampler = MCMCSampler(n_iterations=30000000, burn_in=5000, thinning=10, proposal_sigma=0.3)
-=======
     # MCMC设置 - Windows上减少迭代次数以避免内存问题
     n_iterations = 50000 if os.name == 'nt' else 100000
     sampler = MCMCSampler(n_iterations=n_iterations, burn_in=5000, thinning=10, proposal_sigma=0.3)
->>>>>>> 2f9703d00ffcdbdbceaf5414e0672a37beb74cd4
     
     seasons = sorted(loader.raw_data['season'].unique())
     all_results = []
