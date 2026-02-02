@@ -290,32 +290,32 @@ class MCMCSampler:
         
         # 定义似然函数：粉丝投票需要产生正确的最终排名
         def calculate_log_likelihood_finale(fan_votes: np.ndarray) -> float:
-            """计算满足决赛排名约束的似然度"""
+            """
+            计算满足决赛排名约束的似然度
+            使用非严格不等式（允许平局），因为某些情况下严格不等式不可满足
+            """
             if voting_method in ['rank', 'rank_bottom2']:
                 n = len(fan_votes)
                 judge_rank = n + 1 - np.argsort(np.argsort(judge_share)) - 1
                 fan_rank = n + 1 - np.argsort(np.argsort(fan_votes)) - 1
                 combined = judge_rank + fan_rank  # 越小越好
-                predicted_order = np.argsort(combined)
+                
+                # 检查排名约束：第1名 <= 第2名 <= ... (非严格)
+                combined_scores = [combined[idx] for idx in ranking_order]
+                for i in range(len(combined_scores) - 1):
+                    if combined_scores[i] > combined_scores[i + 1]:
+                        return -100.0  # 违反约束
+                return 0.0  # 满足约束
+                
             else:  # percentage
                 combined = 0.5 * judge_share + 0.5 * fan_votes
-                predicted_order = np.argsort(-combined)  # 从高到低
-            
-            # 检查预测排名是否与实际排名一致
-            predicted_order_list = list(predicted_order)
-            
-            # 计算排名差异的惩罚
-            penalty = 0.0
-            for i, correct_idx in enumerate(ranking_order):
-                if i < len(predicted_order_list):
-                    predicted_position = predicted_order_list.index(correct_idx) if correct_idx in predicted_order_list else i
-                    penalty += (predicted_position - i) ** 2
-            
-            # 完全匹配时penalty=0，给予高似然度；否则惩罚
-            if penalty == 0:
-                return 0.0  # log(1) = 0
-            else:
-                return -penalty * 5.0  # 强惩罚偏离正确排名的情况
+                
+                # 检查排名约束：第1名 >= 第2名 >= ... (非严格)
+                combined_scores = [combined[idx] for idx in ranking_order]
+                for i in range(len(combined_scores) - 1):
+                    if combined_scores[i] < combined_scores[i + 1]:
+                        return -100.0  # 违反约束
+                return 0.0  # 满足约束
         
         # 初始化无约束向量
         z_current = np.zeros(n_contestants)

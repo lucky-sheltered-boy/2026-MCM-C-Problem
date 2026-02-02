@@ -94,6 +94,56 @@ def check_consistency(fan_votes: np.ndarray, judge_share: np.ndarray,
     return False
 
 
+def check_finale_consistency(fan_votes: np.ndarray, judge_share: np.ndarray,
+                             finale_rankings: list, voting_method: str) -> bool:
+    """
+    检查粉丝投票是否满足决赛排名约束
+    
+    Args:
+        fan_votes: 粉丝投票份额
+        judge_share: 评委分数份额
+        finale_rankings: 决赛排名列表，按final_place排序
+        voting_method: 投票方法
+    
+    Returns:
+        是否满足排名约束（第1名综合分 >= 第2名 >= 第3名 ...）
+        注：使用非严格不等式，因为某些情况下严格不等式不可满足
+    """
+    if len(finale_rankings) < 2:
+        return True  # 只有1人，无约束
+    
+    # 获取决赛选手的索引和排名
+    indices = [r['survivor_idx'] for r in finale_rankings]
+    
+    if voting_method == 'percentage':
+        # 百分比法：计算综合分数
+        combined = 0.5 * judge_share + 0.5 * fan_votes
+        combined_scores = [combined[idx] for idx in indices]
+        
+        # 检查是否满足排名约束：第1名得分 >= 第2名 >= 第3名 ... (非严格)
+        for i in range(len(combined_scores) - 1):
+            if combined_scores[i] < combined_scores[i + 1]:
+                return False
+        return True
+    
+    elif voting_method in ['rank', 'rank_bottom2']:
+        # 排名法：计算总排名
+        n = len(fan_votes)
+        judge_rank = n + 1 - np.argsort(np.argsort(judge_share)) - 1
+        fan_rank = n + 1 - np.argsort(np.argsort(fan_votes)) - 1
+        total_rank = judge_rank + fan_rank
+        
+        total_ranks = [total_rank[idx] for idx in indices]
+        
+        # 检查是否满足排名约束：第1名总排名 <= 第2名 <= 第3名 ... (非严格)
+        for i in range(len(total_ranks) - 1):
+            if total_ranks[i] > total_ranks[i + 1]:
+                return False
+        return True
+    
+    return True
+
+
 def calculate_smoothness_distance(prev_votes: np.ndarray, curr_votes: np.ndarray,
                                   prev_names: list, curr_names: list) -> float:
     """
@@ -215,16 +265,81 @@ def process_season_smooth(season: int, loader: DWTSDataLoader,
         
         week_data = season_processed['weeks'][week]
         
-        # 跳过决赛周
-        if week_data.get('is_finale', False):
-            continue
-        
         judge_share = week_data['judge_share']
         judge_ranks = week_data.get('judge_ranks', None)
         survivor_names = week_data['survivor_names']
         eliminated_indices = week_data.get('eliminated_indices_in_survivors', [])
         
-        # 处理无淘汰周 (No Elimination Week)
+        # ===== 处理决赛周 =====
+        if week_data.get('is_finale', False):
+            finale_rankings = week_data.get('finale_rankings', [])
+            
+            if len(finale_rankings) < 2:
+                # 决赛选手不足2人，使用平滑投影
+                if prev_votes is not None:
+                    prev_map = {name: val for name, val in zip(prev_names, prev_votes)}
+                    temp_votes = [prev_map.get(name, 1.0/len(survivor_names)) for name in survivor_names]
+                    temp_votes = np.array(temp_votes)
+                    selected_votes = temp_votes / temp_votes.sum()
+                else:
+                    selected_votes = np.ones(len(survivor_names)) / len(survivor_names)
+                method = 'smooth_projection (finale)'
+                is_consistent = True
+            else:
+                # 使用MCMCSampler的sample_week_finale方法
+                try:
+                    mcmc_samples = sampler.sample_week_finale(judge_share, finale_rankings, voting_method)
+                except:
+                    mcmc_samples = None
+                
+                # 筛选满足决赛排名约束的样本
+                valid_samples = []
+                if mcmc_samples is not None and len(mcmc_samples) > 0:
+                    for s in mcmc_samples:
+                        if check_finale_consistency(s, judge_share, finale_rankings, voting_method):
+                            valid_samples.append(s)
+                
+                if len(valid_samples) > 0:
+                    valid_samples = np.array(valid_samples)
+                    # 选择与上一周最平滑的样本
+                    selected_votes = select_smoothest_sample(
+                        valid_samples, prev_votes, prev_names, survivor_names
+                    )
+                    method = 'mcmc_finale'
+                    is_consistent = True
+                else:
+                    # 失败时使用平滑投影
+                    if prev_votes is not None:
+                        prev_map = {name: val for name, val in zip(prev_names, prev_votes)}
+                        temp_votes = [prev_map.get(name, 1.0/len(survivor_names)) for name in survivor_names]
+                        temp_votes = np.array(temp_votes)
+                        selected_votes = temp_votes / temp_votes.sum()
+                    else:
+                        selected_votes = np.ones(len(survivor_names)) / len(survivor_names)
+                    method = 'fallback_finale'
+                    is_consistent = False
+            
+            # 记录决赛周结果
+            finalist_names = ', '.join([r['name'] for r in finale_rankings[:3]]) if finale_rankings else "N/A"
+            week_result = {
+                'week': week,
+                'eliminated': f"Finale: {finalist_names}",
+                'n_survivors': len(survivor_names),
+                'survivor_names': survivor_names,
+                'fan_votes': selected_votes,
+                'is_consistent': is_consistent,
+                'method': method,
+                'acceptance_rate': sampler.acceptance_rate if is_consistent else 0.0
+            }
+            season_result['weekly_results'].append(week_result)
+            season_result['total_weeks'] += 1
+            if is_consistent:
+                season_result['consistent_weeks'] += 1
+            
+            # 决赛周后不再处理
+            continue
+        
+        # ===== 处理无淘汰周 (No Elimination Week) =====
         if not eliminated_indices:
             # 这种情况约束条件为空，可行解是整个单纯形
             # 根据平滑假设，我们应该保持上一周的投票分布不变（仅做归一化适配）
